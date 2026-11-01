@@ -1,0 +1,980 @@
+#!/bin/sh
+#
+# Copyright (c) 2026, Thiago Sayão. All rights reserved.
+# DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
+#
+# This code is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 only, as
+# published by the Free Software Foundation.  The copyright holder designates
+# this particular file as subject to the "Classpath" exception as provided
+# in the LICENSE file that accompanied this code.
+#
+# This code is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+# version 2 for more details (a copy is included in the LICENSE file that
+# accompanied this code).
+#
+# You should have received a copy of the GNU General Public License version
+# 2 along with this work; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA.
+#
+
+# Runs the system tests of OpenJFX (tests/system, with the robot) in a nested
+# GNOME Shell or KWin, or in Cinnamon on a nested X server, inside a toolbox
+# container of each distribution given, so that they run against the GTK, the
+# desktop and the X server of that distribution, and leave the running desktop
+# untouched.
+#
+# For each distribution, jfx-tester creates the toolbox container
+# jfx-tester-DISTRO-RELEASE when it does not exist (asking first, unless
+# --yes), installs what the build and the desktops need and the OpenJDK of the
+# distribution, copies the sources
+# into a workspace of its own (so that the natives are built against the
+# libraries of the container, and the build of the host is left alone), builds
+# them, and runs the tests in each desktop given. The compositor runs on a
+# private D-Bus session with its own settings, and is closed with the tests.
+#
+# Cinnamon runs on Xephyr, or Xorg with more than one monitor or with
+# --headless: the tests see an X11
+# session, and the robot uses XTest. The glass of GTK 3 is an X11 client: in
+# GNOME and KDE, the tests run on the Xwayland of the nested compositor, and
+# see a Wayland session, so that the robot goes through
+# the screencast and remote desktop portals of the compositor. lib/approve.py
+# grants their permission in the dialogs of the nested desktop, through their
+# accessibility; the robot keeps its token in WORK/home/CONTAINER-DESKTOP, the
+# user.home of the tests.
+#
+# All the system tests take about an hour for each distribution and desktop:
+# --tests runs only some of them.
+#
+# With --manual, jfx-tester runs a manual test instead, a .java source or a
+# .jar anywhere on the host, with the SDK built in the container (java
+# @build/run.args), or a JavaFX SDK given by --sdk, in a nested desktop with a
+# window; the session ends when it is closed.
+#
+# Usage: ./jfx-tester [options] [-- extra Gradle arguments]
+#        ./jfx-tester --manual=FILE [options] [-- arguments of the test]
+#
+# Options:
+#   --distros=D[:R],...     distributions, with their releases, as toolbox
+#                           takes them: fedora:N (or fedora:rawhide),
+#                           ubuntu:YY.MM, arch (latest), rhel:X.Y, and
+#                           mint:X.Y (Ubuntu with the repository of Mint,
+#                           22.3 by default) (the host, or fedora:44)
+#   --desktops=D,...        nested desktops to run the tests in: gnome, kde
+#                           (the whole Plasma desktop) or cinnamon (gnome)
+#   --session=S             the kind of session: wayland, on a nested
+#                           compositor, where the tests run on Xwayland, xorg,
+#                           on Xorg, shown through VNC in a window, or x11, on
+#                           a nested X server, which in a window with one
+#                           monitor is Xephyr and otherwise Xorg (wayland, and
+#                           x11 for Cinnamon, which has no wayland here). GNOME
+#                           has X11 before 49; the environments of an X11 GNOME
+#                           or KDE are named DISTRO-RELEASE-DESKTOP-x11
+#   --xwayland-scale=M      how KWin scales the X11 windows, such as the ones
+#                           of JavaFX, with its Xwayland: apps, which scale
+#                           themselves to the largest scale of the monitors
+#                           (Xft.dpi), as Plasma does by default, or system,
+#                           which draw at the scale 1 and KWin scales them
+#                           (apps). With monitors of different scales, KWin
+#                           scales the windows on the others either way
+#   --tests=PATTERN,...     tests to run, as Gradle --tests takes them, such
+#                           as test.robot.javafx.stage.* (without it, all)
+#   --skip-webkit           leave out the system tests that need the natives
+#                           of WebKit, for a build without -PCOMPILE_WEBKIT=true
+#   --manual=FILE           run a manual test, a .java source (with the
+#                           source launcher) or a .jar, anywhere on the host,
+#                           instead of the system tests
+#   --testlab               run the test lab (manual/testlab) as the manual
+#                           test: its labs of the robot, windows, screens,
+#                           dialogs and so on, with their OK, FAIL and SKIP.
+#                           With --headless, the tests run at startup and it
+#                           exits with their status (-Dtests.run=true and
+#                           -Dtests.exit=true, which --jvm-args can override);
+#                           -Dtests.labs=robot,windows keeps only those labs
+#   --robot=javafx|libei    with --testlab, the input of its tests: the Robot of
+#                           JavaFX (the default), or libei, through the remote
+#                           desktop portal, and the Screenshot portal for the
+#                           screen
+#   --timeout=SECONDS       end the manual test after that time (30 with
+#                           --headless, where no window shows to close it, or
+#                           3600 with --testlab too; none otherwise)
+#   --jvm-args="ARGS"       options of the JVMs of the tests, or of the
+#                           manual test, such as -Dprism.order=sw or
+#                           -Djavafx.robot.screenshotDebug=true; they always
+#                           get -Djdk.gtk.verbose=true, but with --testlab
+#   --log-categories=C,...  categories of the log of the glass of GTK
+#                           (-Dglass.gtk.logCategories): all, dialog, input,
+#                           lifecycle, state, focus, position or size. The
+#                           log is in the natives of -PCONF=DebugNative, which
+#                           the build then gets, unless a -PCONF is given
+#   --source=DIR            OpenJFX sources, which are copied to the workspaces
+#                           and built (it implies --build); without them, the
+#                           workspaces are used as they are
+#   --jdk-version=N         feature version of the OpenJDK of each
+#                           distribution to build and test with, installed
+#                           in its container (jfx.build.jdk.version.min of
+#                           the build.properties of the sources, or of the
+#                           workspace)
+#   --sdk=DIR               a JavaFX SDK of the host (with lib/javafx.*.jar)
+#                           to run the manual test with, instead of a build
+#                           of the sources; it takes neither --source nor
+#                           --build
+#   --jdk=DIR               a JDK of the host to build and test with instead,
+#                           for all the distributions
+#   --headless              run the compositor without a window, on a virtual
+#                           output: nothing shows on the desktop and the focus
+#                           on the host does not matter. A manual test then
+#                           ends after --timeout, as no window shows to close
+#   --monitors=M,...        the monitors, side by side, each a resolution
+#                           with a scale: WxH or a name, 720p, 1080p (fhd),
+#                           wuxga, 1440p (qhd, 2k), 4k (uhd, 2160p), 5k or
+#                           8k, and @SCALE, such as 4k@2,1080p@1.25
+#                           (wuxga@1). GNOME takes them all, and with a window
+#                           GNOME 51 or later. KWin gives its outputs the size
+#                           of the first, and a scale of their own with
+#                           kscreen-doctor. Cinnamon takes them all, in Xorg
+#                           (shown in a window by a VNC viewer, without
+#                           --headless), but one scale, the one of the first
+#   --size=RESOLUTION       one monitor of that resolution (wuxga)
+#   --scale=N               the scale of that monitor (1)
+#   --work=DIR              workspaces, Gradle homes and JDKs
+#                           (~/.cache/jfx-tester)
+#   --results=DIR           where each run keeps its logs and reports, in a
+#                           folder of its own (results, in jfx-tester)
+#   --build                 build the workspace first, which needs --source
+#                           or --no-sync; without both --build and --source,
+#                           the tests run with the build the workspace has,
+#                           which a first run needs
+#   --no-sync               with --build, build the workspace as it is,
+#                           without copying the sources again
+#   --clean                 clean the build of the workspace first (implies
+#                           --build)
+#   --yes, -y               create containers and install packages without
+#                           asking
+#   --parallel              run the environments (distribution and desktop)
+#                           at the same time, once the containers are set up,
+#                           each with a workspace and a build of its own; the
+#                           output of each distribution goes to
+#                           RUN/logs/DISTRO-RELEASE/console.log
+#   --list                  list the containers of jfx-tester and exit
+#   --help, -h              show this help and exit
+#
+# The extra Gradle arguments go to the build and to the tests, such as
+# -PUNSTABLE_TEST=true or -PCONF=Debug. Each run gets a folder of its own,
+# RUN, which is RESULTS/YYYY-MM-DD_HH-MM-SS, and the results of the runs before
+# it stay. Each environment, a distribution and a desktop, such as
+# fedora-44-gnome, gets:
+#
+#   RUN/logs/ENV/            the logs of Gradle, of the compositor and of
+#                            approve.py, tests/CLASS.log with the output and
+#                            the outcome of each test, and junit/ with the
+#                            JUnit reports
+#   RUN/reports/ENV/         the HTML report of the tests
+#
+# The log of the build is RUN/logs/DISTRO-RELEASE/build.log, or
+# RUN/logs/ENV/build.log with --parallel, and
+# RUN/reports/index.html sums up the environments. So does the end of the
+# output, after all of them end or the run is interrupted, also with
+# --parallel: the outcome of each, the tests that failed and its report. The
+# exit status is 1 when any of them fails.
+#
+# Examples:
+#   ./jfx-tester --source=$HOME/jfx
+#   ./jfx-tester --distros=fedora:44,ubuntu:24.04 --desktops=gnome,kde
+#   ./jfx-tester --distros=mint:22.3 --desktops=cinnamon --headless
+#   ./jfx-tester --distros=arch --desktops=kde --tests='test.robot.javafx.stage.*' --headless
+#   ./jfx-tester --distros=fedora:rawhide --yes -- -PUNSTABLE_TEST=true
+#   ./jfx-tester --distros=ubuntu:24.04 --desktops=kde --manual=$HOME/jfx/tests/manual/UI/WindowResizableTest.java
+#   ./jfx-tester --distros=arch --desktops=kde --sdk=$HOME/javafx-sdk-25 --jdk-version=25 --manual=Hello.java
+#   ./jfx-tester --distros=fedora:44 --testlab --headless --jvm-args=-Dtests.labs=robot,windows
+#   ./jfx-tester --distros=fedora:44 --testlab --robot=libei
+
+ROOT=$(cd "$(dirname "$0")" && pwd)
+. "$ROOT/lib/distros.sh"
+
+DISTROS=
+DESKTOPS=gnome
+SESSION=
+XWAYLAND_SCALE=apps
+TESTS=
+MANUAL=
+TESTLAB=
+ROBOT=javafx
+SKIP_WEBKIT=
+TIMEOUT=
+JVM_ARGS=
+LOG_CATEGORIES=
+SOURCE=
+SDK=
+JDK=
+JDK_VERSION=
+HEADLESS=
+SIZE=wuxga
+SCALE=1
+MONITORS=
+WORK=${XDG_CACHE_HOME:-$HOME/.cache}/jfx-tester
+RESULTS=$ROOT/results
+SYNC=1
+BUILD=
+CLEAN=
+YES=
+PARALLEL=
+
+usage() {
+    sed -n '/^# Runs the system tests/,/^[^#]/p' "$0" | sed -e '/^[^#]/d' -e 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+fail() {
+    echo "$*" >&2
+    exit 1
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --distros=*) DISTROS=${1#*=} ;;
+        --desktops=*) DESKTOPS=${1#*=} ;;
+        --session=*) SESSION=${1#*=} ;;
+        --xwayland-scale=*) XWAYLAND_SCALE=${1#*=} ;;
+        --tests=*) TESTS=${1#*=} ;;
+        --manual=*) MANUAL=${1#*=} ;;
+        --testlab) TESTLAB=1 ;;
+        --robot=*) ROBOT=${1#*=} ;;
+        --skip-webkit) SKIP_WEBKIT=1 ;;
+        --timeout=*) TIMEOUT=${1#*=} ;;
+        --jvm-args=*) JVM_ARGS=${1#*=} ;;
+        --log-categories=*) LOG_CATEGORIES=${1#*=} ;;
+        --source=*) SOURCE=${1#*=} ;;
+        --sdk=*) SDK=${1#*=} ;;
+        --jdk=*) JDK=${1#*=} ;;
+        --jdk-version=*) JDK_VERSION=${1#*=} ;;
+        --headless) HEADLESS=1 ;;
+        --size=*) SIZE=${1#*=} ;;
+        --monitors=*) MONITORS=${1#*=} ;;
+        --scale=*) SCALE=${1#*=} ;;
+        --work=*) WORK=${1#*=} ;;
+        --results=*) RESULTS=${1#*=} ;;
+        --build) BUILD=1 ;;
+        --no-sync) SYNC= ;;
+        --clean) CLEAN=1; BUILD=1 ;;
+        --yes|-y) YES=1 ;;
+        --parallel) PARALLEL=1 ;;
+        --list) podman ps -a --filter name='^jfx-tester-' --format '{{.Names}}\t{{.Image}}\t{{.Status}}'; exit $? ;;
+        --help|-h) usage 0 ;;
+        --) shift; break ;;
+        *) echo "Unknown option: $1 (see --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+GRADLE_EXTRA="$*"
+
+# The log of the glass of GTK
+for c in $(printf '%s' "$LOG_CATEGORIES" | tr ',' ' '); do
+    case "$c" in
+        all|dialog|input|lifecycle|state|focus|position|size) ;;
+        *) echo "Unknown log category: $c (all, dialog, input, lifecycle, state, focus, position or size)" >&2
+           exit 2 ;;
+    esac
+done
+# The glass logs all the categories when none is given
+JVM_ARGS="-Dglass.gtk.logCategories=$LOG_CATEGORIES $JVM_ARGS"
+# The glass logs each query of the screens, which the test lab repeats all the
+# time: it gets the verbose log only when --jvm-args asks for it
+[ -n "$TESTLAB" ] || JVM_ARGS="-Djdk.gtk.verbose=true $JVM_ARGS"
+
+[ -f /run/.toolboxenv ] && fail "jfx-tester runs on the host, not inside a toolbox container"
+for tool in toolbox podman rsync; do
+    command -v $tool > /dev/null || fail "$tool is not installed (toolbox: https://containertoolbx.org)"
+done
+# The size of a resolution, WxH or a name
+resolution() {
+    case "$1" in
+        720p|hd) echo 1280x720 ;;
+        1080p|fhd) echo 1920x1080 ;;
+        wuxga) echo 1920x1200 ;;
+        1440p|qhd|2k) echo 2560x1440 ;;
+        4k|uhd|2160p) echo 3840x2160 ;;
+        5k) echo 5120x2880 ;;
+        8k) echo 7680x4320 ;;
+        *x*)
+            case "${1%x*}:${1#*x}" in
+                *[!0-9]*:*|*:*[!0-9]*|:*|*:) return 1 ;;
+            esac
+            echo "$1" ;;
+        *) return 1 ;;
+    esac
+}
+
+# The monitors, as WxH@SCALE
+[ -n "$MONITORS" ] || MONITORS=$SIZE@$SCALE
+list=
+for m in $(printf '%s' "$MONITORS" | tr ',' ' '); do
+    res=${m%%@*}
+    scale=1
+    case "$m" in *@*) scale=${m#*@} ;; esac
+    size=$(resolution "$res") || {
+        echo "Bad resolution: $res (WxH, 720p, 1080p, fhd, wuxga, 1440p, qhd, 2k, 4k, uhd, 5k or 8k)" >&2
+        exit 2
+    }
+    case "$scale" in
+        *[!0-9.]*|''|.*|*.|*.*.*) echo "Bad scale: $scale (such as 1, 1.25 or 2)" >&2; exit 2 ;;
+    esac
+    list="$list${list:+,}$size@$scale"
+done
+[ -n "$list" ] || { echo "No monitors given" >&2; exit 2; }
+MONITORS=$list
+if [ -z "$HEADLESS" ] && [ -z "$WAYLAND_DISPLAY" ] && [ -z "$DISPLAY" ]; then
+    fail "No desktop to show the nested compositor in: run inside a graphical session, or use --headless"
+fi
+
+# The targets, as DISTRO:RELEASE
+if [ -z "$DISTROS" ]; then
+    host=$(os_release ID)
+    case " $DISTROS_SUPPORTED " in
+        *" $host "*) DISTROS=$host ;;
+        *) DISTROS=fedora ;;
+    esac
+fi
+TARGETS=
+for d in $(printf '%s' "$DISTROS" | tr ',' ' '); do
+    distro=${d%%:*}
+    release=
+    case "$d" in *:*) release=${d#*:} ;; esac
+    case " $DISTROS_SUPPORTED " in
+        *" $distro "*) ;;
+        *) echo "Unknown distribution: $distro ($DISTROS_SUPPORTED)" >&2; exit 2 ;;
+    esac
+    [ -n "$release" ] || release=$(default_release "$distro")
+    if [ "$distro" = mint ] && [ -z "$(mint_codename "$release")" ]; then
+        echo "Unknown release of Mint: $release (21, 21.1, 21.2, 21.3, 22, 22.1, 22.2 or 22.3)" >&2
+        exit 2
+    fi
+    TARGETS="$TARGETS $distro:$release"
+done
+for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
+    case "$desktop" in
+        gnome|kde|cinnamon) ;;
+        *) echo "Unknown desktop: $desktop (gnome, kde or cinnamon)" >&2; exit 2 ;;
+    esac
+done
+case "$SESSION" in
+    ''|wayland|x11|xorg) ;;
+    *) echo "Unknown session: $SESSION (wayland, xorg or x11)" >&2; exit 2 ;;
+esac
+XORG=
+[ "$SESSION" = xorg ] && XORG=1
+case "$XWAYLAND_SCALE" in
+    apps|system) ;;
+    *) echo "Unknown scaling of Xwayland: $XWAYLAND_SCALE (apps or system)" >&2; exit 2 ;;
+esac
+
+# A JavaFX SDK, for a manual test only, instead of the sources and the
+# workspaces
+if [ -n "$SDK" ]; then
+    [ -n "$MANUAL" ] || fail "--sdk runs a manual test: give it with --manual (the system tests need --source)"
+    [ -n "$SOURCE" ] && fail "Give either --sdk or --source, not both"
+    [ -n "$BUILD" ] && fail "--sdk is built already: leave out --build and --clean"
+    SDK=$(cd "$SDK" 2>/dev/null && pwd) || fail "No JavaFX SDK in $SDK (see --sdk)"
+    [ -f "$SDK/lib/javafx.base.jar" ] || fail "$SDK is not a JavaFX SDK, with lib/javafx.base.jar (see --sdk)"
+fi
+# The sources, only when given: they are copied to the workspaces and built
+is_jfx() {
+    [ -f "$1/build.properties" ] && [ -d "$1/tests/system" ] && [ -f "$1/gradlew" ]
+}
+if [ -n "$SOURCE" ]; then
+    SOURCE=$(cd "$SOURCE" 2>/dev/null && pwd) || fail "No OpenJFX sources in $SOURCE (see --source)"
+    is_jfx "$SOURCE" || fail "$SOURCE is not an OpenJFX repository (see --source)"
+    BUILD=1
+elif [ -n "$BUILD" ] && [ -n "$SYNC" ]; then
+    fail "--build copies the sources to the workspaces: give them with --source, or use --no-sync"
+fi
+case "$ROBOT" in
+    javafx) ;;
+    libei) [ -n "$TESTLAB" ] || fail "--robot=libei is for --testlab: the system tests use the Robot of JavaFX" ;;
+    *) fail "Unknown robot: $ROBOT (javafx or libei)" ;;
+esac
+[ -z "$SKIP_WEBKIT" ] || [ -z "$MANUAL$TESTLAB" ] \
+    || fail "--skip-webkit is for the system tests, not for a manual test"
+# The test lab, a manual test that runs by itself when there is no window
+if [ -n "$TESTLAB" ]; then
+    [ -n "$MANUAL" ] && fail "Give either --testlab or --manual, not both"
+    MANUAL=$ROOT/manual/testlab/TestLab.java
+    if [ "$ROBOT" = libei ]; then
+        JVM_ARGS="-Dtests.input=libei --enable-native-access=ALL-UNNAMED${JVM_ARGS:+ $JVM_ARGS}"
+    fi
+    if [ -n "$HEADLESS" ]; then
+        TIMEOUT=${TIMEOUT:-3600}
+        JVM_ARGS="-Dtests.run=true -Dtests.exit=true${JVM_ARGS:+ $JVM_ARGS}"
+    fi
+fi
+# The manual test, a .java source or a .jar anywhere on the host
+[ -n "$TIMEOUT" ] && [ -z "$MANUAL" ] && fail "--timeout is for a manual test (--manual)"
+if [ -n "$MANUAL" ]; then
+    [ -n "$HEADLESS" ] && TIMEOUT=${TIMEOUT:-30}
+    case "$TIMEOUT" in
+        *[!0-9]*) fail "--timeout takes seconds: $TIMEOUT" ;;
+    esac
+    case "$MANUAL" in
+        *.java|*.jar) ;;
+        *) fail "A manual test is a .java source or a .jar: $MANUAL" ;;
+    esac
+    [ -f "$MANUAL" ] || fail "No manual test $MANUAL"
+    MANUAL=$(cd "$(dirname "$MANUAL")" && pwd)/$(basename "$MANUAL")
+fi
+if [ -n "$JDK" ]; then
+    JDK=$(cd "$JDK" 2>/dev/null && pwd) && [ -x "$JDK/bin/javac" ] || fail "No JDK in $JDK (see --jdk)"
+fi
+case "$JDK_VERSION" in
+    *[!0-9]*) echo "Bad JDK version: $JDK_VERSION (a feature version, such as 25)" >&2; exit 2 ;;
+esac
+mkdir -p "$WORK" "$RESULTS" || exit 1
+WORK=$(cd "$WORK" && pwd)
+RESULTS=$(cd "$RESULTS" && pwd)
+
+# The containers see the home directory as it is, and the rest of the host
+# under /run/host
+container_path() {
+    case "$1" in
+        "$HOME"|"$HOME"/*) printf '%s\n' "$1" ;;
+        *) printf '/run/host%s\n' "$1" ;;
+    esac
+}
+
+confirm() {
+    [ -n "$YES" ] && return 0
+    printf '%s [y/N] ' "$1"
+    answer=
+    if ! { read -r answer < /dev/tty; } 2>/dev/null; then
+        echo
+        echo "No terminal to ask: use --yes" >&2
+        return 1
+    fi
+    case "$answer" in
+        y|Y|yes|s|S|sim) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+in_container() {
+    toolbox run --container "$CONTAINER" "$@"
+}
+
+ensure_container() {
+    if podman container exists "$CONTAINER" 2>/dev/null; then
+        return 0
+    fi
+    echo "The toolbox container $CONTAINER does not exist."
+    confirm "Create it from $DISTRO $RELEASE?" || { echo "Not created" >&2; return 1; }
+    toolbox --assumeyes create $(toolbox_create_args "$DISTRO" "$RELEASE") "$CONTAINER"
+}
+
+# The repositories that the distribution adds to the one of the container:
+# Mint to Ubuntu
+ensure_repositories() {
+    [ "$DISTRO" = mint ] || return 0
+    in_container sh -c "$MINT_SETUP" sh "$(mint_codename "$RELEASE")" "$(container_path "$ROOT/lib/linuxmint.asc")"
+}
+
+ensure_packages() {
+    packages="$(packages_build "$DISTRO") $(packages_runtime "$DISTRO")"
+    for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
+        [ -n "$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")" ] && continue
+        packages="$packages $(packages_desktop "$DISTRO" "$desktop")"
+        packages="$packages $(packages_session "$DISTRO" "$desktop" "$SESSION")"
+    done
+    [ "$ROBOT" = libei ] && packages="$packages $(packages_libei "$DISTRO")"
+    missing=$(in_container sh -c "$(missing_script "$DISTRO")" sh $packages) || return 1
+    if [ -n "$missing" ]; then
+        echo "Packages missing in $CONTAINER: $missing"
+        confirm "Install them?" || { echo "Not installed" >&2; return 1; }
+        in_container sh -c "$(install_script "$DISTRO")" sh $missing || return 1
+    fi
+    # The optional packages are tried once per container, as a release may not
+    # have them
+    for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
+        stamp=$WORK/optional/$CONTAINER-$desktop
+        optional=$(packages_optional "$DISTRO" "$desktop")
+        [ -z "$optional" ] || [ -f "$stamp" ] && continue
+        missing=$(in_container sh -c "$(missing_script "$DISTRO")" sh $optional)
+        for p in $missing; do
+            in_container sh -c "$(install_script "$DISTRO")" sh "$p" > /dev/null 2>&1 \
+                && echo "Installed $p in $CONTAINER"
+        done
+        mkdir -p "$WORK/optional" && touch "$stamp"
+    done
+}
+
+# The OpenJDK of the distribution, of the version asked for, unless --jdk
+ensure_jdk() {
+    if [ -n "$JDK" ]; then
+        JAVA_HOME_IN=$(container_path "$JDK")
+        return 0
+    fi
+    version=$(jdk_version) || return 1
+    if JAVA_HOME_IN=$(in_container sh -c "$FIND_JDK" sh "$version"); then
+        in_container test -e "$JAVA_HOME_IN/lib/libawt_xawt.so" && return 0
+        # A headless package, whose Java has no AWT on X11: it still builds and
+        # runs the rest of the tests, so that it stays if the full one is refused
+        package=$(in_container sh -c "$(jdk_package_script "$DISTRO")" sh "$version")
+        echo "The OpenJDK $version of $CONTAINER has no AWT for X11, which Swing needs: ${package:-no package has it}"
+        if [ -n "$package" ] && confirm "Install it?" \
+                && in_container sh -c "$(install_script "$DISTRO")" sh $package; then
+            return 0
+        fi
+        echo "Not installed: the tests of Swing are skipped" >&2
+        return 0
+    fi
+    package=$(in_container sh -c "$(jdk_package_script "$DISTRO")" sh "$version")
+    if [ -z "$package" ]; then
+        echo "$DISTRO $RELEASE has no OpenJDK $version: use --jdk-version or --jdk" >&2
+        return 1
+    fi
+    echo "Installing OpenJDK $version in $CONTAINER: $package"
+    confirm "Install it?" || { echo "Not installed" >&2; return 1; }
+    in_container sh -c "$(install_script "$DISTRO")" sh $package || return 1
+    JAVA_HOME_IN=$(in_container sh -c "$FIND_JDK" sh "$version") && return 0
+    echo "$package did not install OpenJDK $version: use --jdk-version or --jdk" >&2
+    return 1
+}
+
+# The feature version of the JDK: the one given, or jfx.build.jdk.version.min
+# of the sources, or else of a workspace of the container
+jdk_version() {
+    [ -n "$JDK_VERSION" ] && { echo "$JDK_VERSION"; return 0; }
+    for p in ${SOURCE:+"$SOURCE/build.properties"} "$WORK/workspace/$CONTAINER_ID/build.properties" \
+            "$WORK/workspace/$CONTAINER_ID"-*/build.properties; do
+        [ -f "$p" ] || continue
+        v=$(sed -n 's/^jfx\.build\.jdk\.version\.min=\([0-9]*\).*/\1/p' "$p")
+        [ -n "$v" ] && { echo "$v"; return 0; }
+    done
+    if [ -n "$SDK" ]; then
+        echo "No workspace of $CONTAINER to take the version of the JDK from: use --jdk-version or --jdk for $SDK" >&2
+    else
+        echo "No sources nor workspace of $CONTAINER to take the version of the JDK from: use --source, --jdk-version or --jdk" >&2
+    fi
+    return 1
+}
+
+# A script, run in the container with a feature version, that prints the home
+# of the JDK of that version
+FIND_JDK='for j in /usr/lib/jvm/*/; do
+    [ -x "$j/bin/javac" ] || continue
+    case "$("$j/bin/javac" -version 2>&1)" in
+        "javac $1"|"javac $1".*|"javac $1-"*) readlink -f "$j"; exit 0 ;;
+    esac
+done
+exit 1'
+
+# A copy of the sources for each container, whose builds stay apart from the
+# build of the host and from each other. The ignored files of git, such as the
+# builds, are neither copied nor deleted
+sync_sources() {
+    mkdir -p "$WORKSPACE"
+    [ -z "$SYNC" ] && [ -f "$WORKSPACE/gradlew" ] && return 0
+    if [ -z "$SOURCE" ]; then
+        echo "$WORKSPACE has no sources: give them with --source" >&2
+        return 1
+    fi
+    echo "Copying $SOURCE to $WORKSPACE"
+    rsync -a --delete --exclude=/.git --exclude=/.idea --exclude='cmake-build-*' \
+        --filter=':- .gitignore' "$SOURCE/" "$WORKSPACE/"
+}
+
+# Gradle in the container, with a home of its own: a daemon of the host or of
+# another container, which shares the network, would build with its libraries
+gradle() {
+    in_container env JAVA_HOME="$JAVA_HOME_IN" GRADLE_USER_HOME="$WORK/gradle/$CONTAINER" \
+        sh "$(container_path "$ROOT/lib/owned.sh")" $$ \
+        sh -c 'cd "$1" && shift && exec sh ./gradlew "$@"' sh "$WORKSPACE" "$@"
+}
+
+# Runs a command in the background, as the traps of the shell wait for a
+# command in the foreground to end
+background() {
+    "$@" &
+    wait $!
+}
+
+GRADLE_ARGS="--no-daemon --console=plain -PFULL_TEST=true -PUSE_ROBOT=true"
+# The configuration of the build: the one given, or DebugNative for the log
+# categories, which are compiled in its natives only. The extra arguments of a
+# manual test are its own
+CONF=Release
+[ -n "$LOG_CATEGORIES" ] && CONF=DebugNative
+CONF_GIVEN=
+if [ -z "$MANUAL" ]; then
+    for a in $GRADLE_EXTRA; do
+        case "$a" in -PCONF=*) CONF=${a#-PCONF=}; CONF_GIVEN=1 ;; esac
+    done
+fi
+[ -z "$CONF_GIVEN" ] && [ "$CONF" != Release ] && GRADLE_ARGS="$GRADLE_ARGS -PCONF=$CONF"
+
+build() {
+    # The extra arguments of a manual test are its own
+    set -- sdk :systemTests:testClasses $GRADLE_EXTRA
+    [ -n "$MANUAL" ] && set -- sdk
+    log=$BUILD_LOG
+    mkdir -p "$(dirname "$log")"
+    : > "$log"
+    # The natives do not take the configuration as an input, and stay as they
+    # were built when it changes: they and the SDK are removed then, which
+    # Gradle builds again
+    stamp=$WORK/conf/$(basename "$WORKSPACE")
+    built=$(cat "$stamp" 2>/dev/null)
+    if [ "${built:-Release}" != "$CONF" ] && [ -d "$WORKSPACE/build" ]; then
+        echo "$WORKSPACE was built as ${built:-Release}, now $CONF: building its natives again"
+        find "${WORKSPACE:?}/modules" -mindepth 3 -maxdepth 3 -path '*/build/*' \
+            \( -name native -o -name libs \) -type d -exec rm -rf {} +
+        rm -rf "${WORKSPACE:?}/build/sdk"
+    fi
+    # The applications need ant to be cleaned
+    if [ -n "$CLEAN" ]; then
+        background gradle $GRADLE_ARGS clean -x :apps:cleanLinux >> "$log" 2>&1 || return 1
+    fi
+    echo "Building OpenJFX ($CONF) in $CONTAINER, log in $log"
+    background gradle $GRADLE_ARGS "$@" >> "$log" 2>&1
+    status=$?
+    if [ $status -ne 0 ]; then
+        tail -n 40 "$log" >&2
+        echo "The build failed, see $log" >&2
+    else
+        mkdir -p "$WORK/conf"
+        echo "$CONF" > "$stamp"
+    fi
+    return $status
+}
+
+# The counts of the JUnit reports: tests, failures, errors and skipped
+count_results() {
+    cat "$1"/TEST-*.xml 2>/dev/null | awk '
+        /<testsuite / {
+            for (i = 1; i <= NF; i++) {
+                if (split($i, kv, "=") == 2) {
+                    gsub(/[">\/]/, "", kv[2])
+                    if (kv[1] == "tests") t += kv[2]
+                    else if (kv[1] == "failures") f += kv[2]
+                    else if (kv[1] == "errors") e += kv[2]
+                    else if (kv[1] == "skipped") s += kv[2]
+                }
+            }
+        }
+        END { printf "%d tests, %d failures, %d errors, %d skipped", t, f, e, s }'
+}
+
+# The tests that failed in the JUnit reports, a line for each with the class,
+# the test and the message, separated by tabs and escaped as in XML. What the
+# tests print comes after them, in system-out, and can look like anything
+failed_tests() {
+    cat "$1"/TEST-*.xml 2>/dev/null | awk '
+        function attr(line, key) {
+            if (match(line, " " key "=\"[^\"]*\"")) {
+                return substr(line, RSTART + length(key) + 3, RLENGTH - length(key) - 4)
+            }
+            return ""
+        }
+        /^<testsuite / { output = 0 }
+        /^ *<system-out>/ { output = 1 }
+        output { next }
+        /^ *<testcase / { name = attr($0, "name"); class = attr($0, "classname") }
+        /^ *<(failure|error) / { printf "%s\t%s\t%s\n", class, name, attr($0, "message") }'
+}
+
+# XML or HTML text as it reads in the terminal
+unescape() {
+    sed -e 's/&#10;/ /g' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' -e "s/&apos;/'/g" -e 's/&amp;/\&/g'
+}
+
+# The directory of the X sockets of the host shows in the container as owned
+# by nobody, where neither KWin nor Mutter create the socket of their
+# Xwayland: the container gets a directory of the user, which the host does
+# not see
+private_x11_sockets() {
+    in_container true || return 1
+    podman exec --user root "$CONTAINER" sh -c \
+        '[ "$(stat -c %u /tmp/.X11-unix)" = "$1" ] || mount -t tmpfs -o mode=1777,uid="$1" tmpfs /tmp/.X11-unix' \
+        sh "$(id -u)"
+}
+
+# The tests of an environment, a distribution and a desktop. Their results go
+# to directories of the environment (lib/session.sh)
+run_tests() {
+    set -- $GRADLE_ARGS --continue :systemTests:test
+    for t in $(printf '%s' "$TESTS" | tr ',' ' '); do
+        set -- "$@" --tests "$t"
+    done
+    background in_container env JAVA_HOME="$JAVA_HOME_IN" GRADLE_USER_HOME="$WORK/gradle/$CONTAINER" \
+        JT_DESKTOP="$desktop" JT_SESSION="$(session_type "$desktop" "$SESSION")" JT_XORG="$XORG" \
+        JT_XWAYLAND_SCALE="$XWAYLAND_SCALE" \
+        JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_REPORT="$REPORTS/$env" \
+        JT_ENV="$env" JT_MONITORS="$MONITORS" JT_HEADLESS="$HEADLESS" \
+        JT_HOME="$WORK/home/$CONTAINER-$desktop" JT_OWNER=$$ JT_JVM_ARGS="$JVM_ARGS" JT_SKIP_WEBKIT="$SKIP_WEBKIT" \
+        dbus-run-session -- sh "$(container_path "$ROOT/lib/session.sh")" "$@" $GRADLE_EXTRA
+}
+
+# The manual test in the container, where it is on the host
+run_manual() {
+    background in_container env JAVA_HOME="$JAVA_HOME_IN" \
+        JT_DESKTOP="$desktop" JT_SESSION="$(session_type "$desktop" "$SESSION")" JT_XORG="$XORG" \
+        JT_XWAYLAND_SCALE="$XWAYLAND_SCALE" \
+        JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_MONITORS="$MONITORS" \
+        JT_HOME="$WORK/home/$CONTAINER-$desktop" JT_OWNER=$$ JT_HEADLESS="$HEADLESS" \
+        JT_MANUAL="$(container_path "$MANUAL")" JT_TIMEOUT="$TIMEOUT" JT_SDK="${SDK:+$(container_path "$SDK")}" JT_JVM_ARGS="$JVM_ARGS" \
+        dbus-run-session -- sh "$(container_path "$ROOT/lib/session.sh")" $GRADLE_EXTRA
+}
+
+# The name of the environment of a desktop of the distribution: GNOME and KDE
+# on X11 get -x11, as Wayland is their default
+env_name() {
+    name=$CONTAINER_ID-$1
+    case "$1:$(session_type "$1" "$SESSION")" in
+        gnome:x11|kde:x11) name=$name-x11 ;;
+    esac
+    echo "$name$SUFFIX"
+}
+
+# The outcome of an environment, for the summary: OK, FAIL, SKIP, SETUP or
+# BUILD, and what to say about it
+outcome() {
+    mkdir -p "$LOGS/$1"
+    printf '%s\t%s\n' "$2" "$3" > "$LOGS/$1/outcome"
+}
+
+run_environment() {
+    env=$(env_name "$desktop")
+    mkdir -p "$LOGS/$env" "$WORK/home/$CONTAINER-$desktop"
+    echo "== $env: running, logs in $LOGS/$env"
+    if [ -n "$MANUAL" ]; then
+        run_manual
+        status=$?
+        if [ $status -eq 0 ]; then
+            outcome "$env" OK "$(basename "$MANUAL")"
+        else
+            outcome "$env" FAIL "$(basename "$MANUAL") exited with $status"
+        fi
+    else
+        run_tests
+        status=$?
+        counts=$(count_results "$LOGS/$env/junit")
+        if [ $status -eq 0 ]; then
+            outcome "$env" OK "$counts"
+        else
+            outcome "$env" FAIL "$counts"
+        fi
+    fi
+    rm -rf "${LOGS:?}/${env:?}/config"
+    echo "== $env: $(cut -f1 "$LOGS/$env/outcome")"
+}
+
+# The workspace, ready for the tests: copied and built with --source, or as it
+# was built before, which then has to be with the configuration asked for.
+# Sets PREPARE_ERROR when it is not
+prepare() {
+    # A JavaFX SDK needs no workspace
+    [ -n "$SDK" ] && return 0
+    if [ -n "$BUILD" ]; then
+        sync_sources && build && return 0
+        PREPARE_ERROR="the build failed, see $BUILD_LOG"
+        return 1
+    fi
+    if [ ! -f "$WORKSPACE/build/run.args" ] || [ ! -d "$WORKSPACE/build/sdk/lib" ]; then
+        PREPARE_ERROR="$WORKSPACE has not been built: use --source"
+    else
+        built=$(cat "$WORK/conf/$(basename "$WORKSPACE")" 2>/dev/null)
+        # A build of DebugNative does for Release too, when no configuration
+        # is asked for: the tests then run with its configuration
+        if [ "${built:-Release}:$CONF:$CONF_GIVEN" = DebugNative:Release: ]; then
+            GRADLE_ARGS="$GRADLE_ARGS -PCONF=DebugNative"
+            built=Release
+        fi
+        if [ "${built:-Release}" = "$CONF" ]; then
+            echo "Using the build of $WORKSPACE (--source copies the sources and builds them again)"
+            return 0
+        fi
+        PREPARE_ERROR="$WORKSPACE was built as ${built:-Release}, not $CONF: use --source, or --build --no-sync"
+    fi
+    echo "$PREPARE_ERROR" >&2
+    return 1
+}
+
+# The environments of a distribution. One after the other, they share the
+# workspace of the distribution, built once. At the same time, each has a
+# workspace of its own, as two builds in a workspace run the same tasks at the
+# same time, which then fail
+run_distribution() {
+    if ! private_x11_sockets; then
+        for desktop in $DESKTOP_LIST; do
+            outcome "$(env_name "$desktop")" SETUP "no directory for the X sockets in $CONTAINER"
+        done
+        return
+    fi
+    if [ -z "$PARALLEL" ]; then
+        WORKSPACE=$WORK/workspace/$CONTAINER_ID
+        BUILD_LOG=$LOGS/$CONTAINER_ID/build.log
+        if ! prepare; then
+            for desktop in $DESKTOP_LIST; do
+                outcome "$(env_name "$desktop")" BUILD "$PREPARE_ERROR"
+            done
+            return
+        fi
+    fi
+    jobs=
+    for desktop in $DESKTOP_LIST; do
+        reason=$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")
+        if [ -z "$reason" ] && [ "$desktop:$(session_type "$desktop" "$SESSION")" = gnome:x11 ] \
+                && ! in_container sh -c 'gnome-shell --help-all 2>&1 | grep -q -e "--x11 "'; then
+            reason="The GNOME of $DISTRO $RELEASE has no X11 session (GNOME 49 and later do not)"
+        fi
+        if [ -n "$reason" ]; then
+            echo "$reason" >&2
+            outcome "$(env_name "$desktop")" SKIP "$reason"
+        elif [ -n "$PARALLEL" ]; then
+            (WORKSPACE=$WORK/workspace/$CONTAINER_ID-$desktop
+             BUILD_LOG=$LOGS/$(env_name "$desktop")/build.log
+             [ -n "$BUILD" ] && rm -f "$BUILD_LOG"
+             if prepare; then
+                 run_environment
+             else
+                 outcome "$(env_name "$desktop")" BUILD "$PREPARE_ERROR"
+             fi) &
+            jobs="$jobs $!"
+        else
+            run_environment
+        fi
+    done
+    [ -n "$jobs" ] && wait $jobs
+}
+
+# A summary of the outcomes, with the tests that failed, and a page with the
+# reports. It waits for nothing: the environments that have not ended, when
+# interrupted, show as STOPPED
+summarize() {
+    echo
+    echo "Results (logs in $LOGS, reports in $REPORTS):"
+    failed=
+    page=$REPORTS/index.html.$$
+    total_ok=0 total_other=0 total_tests=0 total_failures=0 total_errors=0 total_skipped=0
+    {
+        echo '<!doctype html><html><head><meta charset="utf-8"><title>jfx-tester</title>'
+        echo '<style>body{font-family:sans-serif;margin:2em}td,th{padding:.3em 1em;text-align:left}'
+        echo '.OK{color:#080}.FAIL,.BUILD,.SETUP,.STOPPED{color:#c00}.SKIP{color:#888}</style></head><body>'
+        echo "<h1>jfx-tester</h1><p>$(date)</p>"
+        echo '<table><tr><th>Environment</th><th>Outcome</th><th></th><th></th></tr>'
+    } > "$page"
+    for env in $ENVIRONMENTS; do
+        f=$LOGS/$env/outcome
+        if [ -f "$f" ]; then
+            result=$(cut -f1 "$f")
+            text=$(cut -f2- "$f")
+        else
+            result=STOPPED
+            text="it did not end"
+        fi
+        printf '  %-32s %-7s %s\n' "$env" "$result" "$text"
+        case $result in
+            OK) total_ok=$((total_ok + 1)) ;;
+            SKIP) ;;
+            *) failed=1; total_other=$((total_other + 1)) ;;
+        esac
+        report=
+        [ -f "$REPORTS/$env/index.html" ] && report="<a href=\"$env/index.html\">report</a>"
+        printf '<tr><td>%s</td><td class="%s">%s</td><td>%s</td><td>%s</td></tr>\n' \
+            "$env" "$result" "$result" "$text" "$report" >> "$page"
+        if [ -z "$MANUAL" ] && { [ "$result" = OK ] || [ "$result" = FAIL ]; }; then
+            set -- $text
+            total_tests=$((total_tests + $1))
+            total_failures=$((total_failures + $3))
+            total_errors=$((total_errors + $5))
+            total_skipped=$((total_skipped + $7))
+        fi
+        if [ -z "$MANUAL" ] && [ "$result" = FAIL ]; then
+            tests=$(failed_tests "$LOGS/$env/junit")
+            if [ -n "$tests" ]; then
+                printf '%s\n' "$tests" | while IFS=$(printf '\t') read -r class name message; do
+                    printf '      FAIL %s.%s: %s\n' "$class" "$name" "$message" | unescape | cut -c1-200
+                done
+                {
+                    echo '<tr><td colspan="4"><ul>'
+                    printf '%s\n' "$tests" | while IFS=$(printf '\t') read -r class name message; do
+                        printf '<li><a href="%s/%s/index.html">%s.%s</a>: %s</li>\n' \
+                            "$env" "$class" "$class" "$name" "$message"
+                    done
+                    echo '</ul></td></tr>'
+                } >> "$page"
+            else
+                echo "      no test failed: see $LOGS/$env/gradle.log"
+            fi
+        fi
+        [ -f "$REPORTS/$env/index.html" ] && echo "      report: $REPORTS/$env/index.html"
+    done
+    echo '</table></body></html>' >> "$page"
+    mv -f "$page" "$REPORTS/index.html"
+    summary="$total_ok OK, $total_other not OK"
+    [ -n "$MANUAL" ] || summary="$summary; $total_tests tests, $total_failures failures, $total_errors errors, $total_skipped skipped"
+    echo "  Total: $summary"
+    echo "  $REPORTS/index.html"
+    [ -z "$failed" ]
+}
+
+# A folder of its own for this run, also when another one starts in the same
+# second
+JOBS=
+RUN_BASE=$RESULTS/$(date +%F_%H-%M-%S)
+RUN=$RUN_BASE
+n=1
+until mkdir "$RUN" 2>/dev/null; do
+    [ -e "$RUN" ] || { echo "Cannot create $RUN" >&2; exit 1; }
+    n=$((n + 1))
+    RUN=$RUN_BASE-$n
+done
+LOGS=$RUN/logs
+REPORTS=$RUN/reports
+mkdir -p "$LOGS" "$REPORTS"
+echo "== Results in $RUN"
+DESKTOP_LIST=$(printf '%s' "$DESKTOPS" | tr ',' ' ')
+SUFFIX=
+[ -n "$MANUAL" ] && SUFFIX=-manual
+ENVIRONMENTS=
+trap 'trap "" INT TERM; kill $JOBS 2>/dev/null; summarize; exit 130' INT TERM
+
+# The containers first, one after the other, as they may ask
+READY=
+for target in $TARGETS; do
+    DISTRO=${target%%:*}
+    RELEASE=${target#*:}
+    CONTAINER_ID=$DISTRO-$RELEASE
+    CONTAINER=jfx-tester-$CONTAINER_ID
+    for desktop in $DESKTOP_LIST; do
+        ENVIRONMENTS="$ENVIRONMENTS $(env_name "$desktop")"
+    done
+    echo "== $DISTRO $RELEASE ($CONTAINER)"
+    if ensure_container && ensure_repositories && ensure_packages && ensure_jdk; then
+        READY="$READY $target:$JAVA_HOME_IN"
+    else
+        for desktop in $DESKTOP_LIST; do
+            outcome "$(env_name "$desktop")" SETUP "the container could not be set up"
+        done
+    fi
+done
+
+# Then the distributions, one after the other or at the same time
+for ready in $READY; do
+    DISTRO=${ready%%:*}
+    rest=${ready#*:}
+    RELEASE=${rest%%:*}
+    JAVA_HOME_IN=${rest#*:}
+    CONTAINER_ID=$DISTRO-$RELEASE
+    CONTAINER=jfx-tester-$CONTAINER_ID
+    if [ -n "$PARALLEL" ]; then
+        mkdir -p "$LOGS/$CONTAINER_ID"
+        echo "== $CONTAINER_ID: started, output in $LOGS/$CONTAINER_ID/console.log"
+        run_distribution > "$LOGS/$CONTAINER_ID/console.log" 2>&1 &
+        JOBS="$JOBS $!"
+    else
+        run_distribution
+    fi
+done
+[ -n "$JOBS" ] && wait $JOBS
+
+summarize
