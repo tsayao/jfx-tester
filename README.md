@@ -359,3 +359,7 @@ Gradle, for both the build and the tests (or to the manual test):
 
 To remove a container: `podman rm -f jfx-tester-ubuntu-24.04`, and its
 workspaces and Gradle home under `~/.cache/jfx-tester`.
+
+## License
+
+GPL version 2 with the Classpath exception, as OpenJFX: see [LICENSE](LICENSE).
