@@ -171,14 +171,16 @@ session_type() {
 # Installed when the distribution has them: the viewer of the nested GNOME
 # Shell 49 and later (gnome-shell --devkit), which some releases ship apart,
 # kscreen-doctor, for the scale of each output of KWin, and the Wayland plugin
-# of the Qt of Plasma, without which it does not start on KWin
+# of the Qt of Plasma, without which it does not start on KWin, and the backends of
+# KWin, which Plasma 5.24 ships apart
 packages_optional() {
     case "$(family "$1"):$2" in
         fedora:gnome) echo mutter-devkit ;;
         ubuntu:gnome) echo mutter-dev-bin ;;
         arch:gnome) echo mutter-devkit ;;
         fedora:kde|arch:kde) echo libkscreen ;;
-        ubuntu:kde) echo libkscreen-bin libkf5screen-bin qtwayland5 qt6-wayland ;;
+        ubuntu:kde) echo libkscreen-bin libkf5screen-bin qtwayland5 qt6-wayland \
+            kwin-wayland-backend-virtual kwin-wayland-backend-wayland ;;
     esac
 }
 

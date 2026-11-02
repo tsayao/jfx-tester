@@ -840,7 +840,12 @@ grant_permission() {
 if [ "$SESSION_TYPE" = wayland ]; then
     grant_permission screenshot screenshot
     grant_permission kde-authorized remote-desktop
-    (exec python3 -u "$(dirname "$0")/approve.py") > "$JT_LOGS/approve.log" 2>&1 &
+    # It ends when the bus of AT-SPI is not there yet, which takes longer with other
+    # sessions starting at the same time. Without it, the tests of the robot time out
+    (for i in $(seq 1 30); do
+         python3 -u "$(dirname "$0")/approve.py" && break
+         sleep 1
+     done) > "$JT_LOGS/approve.log" 2>&1 &
     CHILDREN="$CHILDREN $!"
 fi
 
@@ -869,6 +874,10 @@ import org.gradle.api.tasks.testing.TestResult
 allprojects {
     tasks.withType(Test).configureEach {
         systemProperty 'user.home', System.getenv('JT_HOME')
+        // A test stuck where an interrupt does not reach, as in the wait of the robot of
+        // AWT for a portal or in a deadlock of class initializers, fails at its timeout
+        // and leaves its thread, instead of keeping the run there forever
+        systemProperty 'junit.jupiter.execution.timeout.thread.mode.default', 'SEPARATE_THREAD'
         def args = System.getenv('JT_JVM_ARGS')
         if (args) {
             jvmArgs args.trim().split(/\s+/)
@@ -890,6 +899,8 @@ allprojects {
                 if (name == 'test.com.sun.javafx.application.NullCCLTest') {
                     filter.excludeTestsMatching("${name}.testHTMLEditor")
                     filter.excludeTestsMatching("${name}.testWebView")
+                } else if (name == 'test.launchertest.ModuleLauncherTest') {
+                    filter.excludeTestsMatching("${name}.testModuleJSCallback*")
                 } else if (path.startsWith('test/javafx/scene/web/') || path.startsWith('test/com/sun/webkit/')
                         || f.text =~ uses) {
                     filter.excludeTestsMatching(name)
@@ -899,7 +910,19 @@ allprojects {
 
         def systemTests = project.path == ':systemTests'
         def classes = [] as Set
+        def shown = 0L
         def total = 0, passed = 0, failed = 0, skipped = 0, started = 0L
+        def progress = { String what ->
+            def done = classes.size()
+            def width = 20
+            def full = total > 0 ? Math.min(width, (int) (done * width / total)) : 0
+            def percent = total > 0 ? Math.min(100, (int) (done * 100 / total)) : 0
+            def elapsed = (System.currentTimeMillis() - started) / 1000
+            def left = done > 0 && total > done ? (int) (elapsed * (total - done) / done) : 0
+            printf('PROGRESS %s [%s%s] %3d%% %d/%d classes, %d passed, %d failed, %d skipped, %dm%02ds left  %s%n',
+                    env, '#' * full, '.' * (width - full), percent, done, total, passed, failed, skipped,
+                    (int) (left / 60), (int) (left % 60), what)
+        }
         doFirst {
             started = System.currentTimeMillis()
             def regex = { String p -> ~('^' + p.split(/\*/, -1).collect { java.util.regex.Pattern.quote(it) }.join('.*') + '$') }
@@ -916,16 +939,9 @@ allprojects {
                     total++
                 }
             }
-        }
-        def progress = { String what ->
-            def done = classes.size()
-            def width = 20
-            def full = total > 0 ? Math.min(width, (int) (done * width / total)) : 0
-            def elapsed = (System.currentTimeMillis() - started) / 1000
-            def left = done > 0 && total > done ? (int) (elapsed * (total - done) / done) : 0
-            printf('PROGRESS %s [%s%s] %d/%d classes, %d passed, %d failed, %d skipped, %dm%02ds left  %s%n',
-                    env, '#' * full, '.' * (width - full), done, total, passed, failed, skipped,
-                    (int) (left / 60), (int) (left % 60), what)
+            if (systemTests) {
+                progress('starting')
+            }
         }
 
         def tests = new File(logs, 'tests')
@@ -955,6 +971,11 @@ allprojects {
                     case TestResult.ResultType.SUCCESS: passed++; break
                     case TestResult.ResultType.FAILURE: failed++; break
                     default: skipped++
+                }
+                // Between the classes too, which may take minutes
+                if (systemTests && System.currentTimeMillis() - shown >= 2000) {
+                    shown = System.currentTimeMillis()
+                    progress("${d.className}: ${d.name}")
                 }
                 def text = "==== ${d.name}: ${r.resultType} (${r.endTime - r.startTime} ms)\n"
                 r.exceptions.each { e ->

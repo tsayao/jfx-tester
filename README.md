@@ -25,8 +25,32 @@ distribution. For each distribution, it:
    builds them inside the container;
 3. for each desktop, starts a nested session, runs the tests in it, and closes it.
 
-You need `toolbox`, `podman` and `rsync` on the host. Run jfx-tester on the host, not
-inside a toolbox.
+Run jfx-tester on the host, not inside a toolbox.
+
+## Requirements
+
+On the host:
+
+* Linux with `toolbox` and `podman`, which run the containers, and `rsync`, which copies
+  the sources. jfx-tester stops when one of them is missing:
+
+  ```sh
+  sudo dnf install toolbox podman rsync      # Fedora
+  sudo apt install podman-toolbox rsync      # Ubuntu and Debian
+  sudo pacman -S toolbox rsync               # Arch
+  ```
+
+* A POSIX shell and the usual GNU tools (`awk`, `diff`, `sed`, `tail`), which most
+  distributions have by default.
+* The sources of OpenJFX for `--source`, or a JavaFX SDK for `--sdk` with `--manual`.
+* A graphical session, unless you use `--headless`.
+* Internet access for the first run of each distribution, and for `rhel`, a subscribed host.
+* Disk space: about 1 GB for each workspace and 2.5 GB for the Gradle caches, besides the
+  containers. Building WebKit (`-PCOMPILE_WEBKIT=true`) takes much more.
+
+Nothing else is needed on the host: not Java, Gradle or Python. The packages of the build
+and of the desktops, the OpenJDK, and the Python that `lib/approve.py` runs with are
+installed in each container, which asks first, unless `--yes` is given.
 
 The containers are regular toolbox containers, so you can also open one yourself:
 
@@ -161,13 +185,17 @@ drop, clipboard, rendering, 3D and Swing. It needs JDK 22 and JavaFX 27 or later
 ### JDK-8354943
 
 `manual/JDK8354943Test.sh` runs the tests of the bugs that JDK-8354943 should fix, each
-on the environments of its report. It does not build: it uses the workspaces of
-`mint:22.3` and `ubuntu:24.04`, or the SDK of `--sdk`.
+on the environments of its report. Nothing is copied or built unless `--build` or
+`--clean` is given. Without them, it uses `DIR/build/sdk` with `--source=DIR`, the SDK of
+`--sdk`, or else the builds of the workspaces of `mint:22.3` and `ubuntu:24.04`. A build
+made on a newer distribution may not load in those containers: it then stops and says so.
 
 ```sh
 manual/JDK8354943Test.sh --list                                 # print the commands
 manual/JDK8354943Test.sh --headless                             # run them all
 manual/JDK8354943Test.sh --headless --session=xorg              # only on Xorg
+manual/JDK8354943Test.sh --headless --source=$HOME/jfx           # run the build of these sources
+manual/JDK8354943Test.sh --headless --source=$HOME/jfx --build   # copy and build them first
 manual/JDK8354943Test.sh --sdk=DIR --headless JDK-8353556 JDK-8316425
 ```
 
@@ -214,6 +242,18 @@ such as `fedora-44-gnome`.
 | `logs/ENV/tests/`        | a log per test class                                 |
 | `logs/ENV/junit/`        | the JUnit reports                                    |
 | `logs/DISTRO-RELEASE/build.log` | the build (`logs/ENV/build.log` with `--parallel`) |
+
+While the system tests run, a terminal shows a progress bar for each environment, from
+the copy and the build to the tests, with how many tests passed, failed and were
+skipped. With `--parallel`, the output has only the bars:
+
+```
+ubuntu-26.04-gnome [####................]  20% 61/302 classes, 540 passed, 2 failed, 11 skipped, 41m10s left  test.javafx.stage.SizeToSceneTest: SUCCESS
+ubuntu-26.04-kde [##..................]  12% 37/302 classes, 301 passed, 0 failed, 4 skipped, 52m33s left  test.javafx.scene.RobotTest: SUCCESS
+```
+
+The total of classes and the time left are estimates, from the sources. When the output is
+not a terminal, each test class prints this as a `PROGRESS` line.
 
 A summary is printed at the end, or when the run is interrupted. The exit status is 1
 when any environment fails.

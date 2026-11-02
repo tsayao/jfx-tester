@@ -35,12 +35,14 @@
 #   --session=S  only the runs of this kind of session, wayland or xorg
 #   JDK-N        only these bugs
 #
-# Any other option goes to jfx-tester, such as --headless or --sdk=DIR. It does not
-# build: the runs take the builds that the workspaces of the distributions have, or
-# the SDK of --sdk. --source=DIR only checks that the workspaces have those sources.
+# Any other option goes to jfx-tester, such as --headless or --sdk=DIR. Nothing is
+# copied or built unless --build or --clean is given, with --source=DIR or --no-sync,
+# in the first run of each distribution. Without them, the runs take DIR/build/sdk with
+# --source=DIR, the SDK of --sdk, or else the builds of the workspaces.
 #
 #   manual/JDK8354943Test.sh --headless
 #   manual/JDK8354943Test.sh --source=$HOME/IdeaProjects/jfx2 --headless
+#   manual/JDK8354943Test.sh --source=$HOME/IdeaProjects/jfx2 --build --headless
 #   manual/JDK8354943Test.sh --sdk=$HOME/jfx/build/sdk --headless JDK-8353556
 #
 # All the runs share a folder, RESULTS/JDK8354943Test_YYYY-MM-DD_HH-MM-SS (results
@@ -90,15 +92,15 @@ EXTRA=
 RESULTS=results
 SESSION=
 SOURCE=
+BUILD_ARGS=
+BUILT=
 for a in "$@"; do
     case "$a" in
         --list) LIST=1 ;;
         --ubuntu22) WITH_UBUNTU22=1 ;;
         JDK-*) BUGS="$BUGS $a" ;;
         --source=*) SOURCE=${a#*=} ;;
-        --build|--clean|--no-sync)
-            echo "$a: this script does not build. Build each distribution with ./jfx-tester --source=DIR --build, then run it" >&2
-            exit 2 ;;
+        --build|--clean|--no-sync) BUILD_ARGS="$BUILD_ARGS $a" ;;
         --results=*) RESULTS=${a#*=} ;;
         --work=*) WORK=${a#*=}; EXTRA="$EXTRA $a" ;;
         --session=wayland|--session=xorg) SESSION=${a#*=} ;;
@@ -107,21 +109,6 @@ for a in "$@"; do
     esac
 done
 
-# The sources given, which the workspaces have to be built from: a build of the host
-# in DIR/build/sdk does not load in the containers, whose C library may be older
-check_workspace() {
-    workspace=${WORK:-$HOME/.cache/jfx-tester}/workspace/$1
-    glass=modules/javafx.graphics/src/main
-    if ! [ -f "$workspace/build/sdk/lib/libglassgtk3.so" ]; then
-        echo "$workspace has no build: build it with ./jfx-tester --source=$SOURCE --build --distros=$2" >&2
-        exit 2
-    fi
-    if ! diff -rq "$SOURCE/$glass" "$workspace/$glass" > /dev/null 2>&1; then
-        echo "$workspace was not built from $SOURCE: build it with ./jfx-tester --source=$SOURCE --build --distros=$2" >&2
-        exit 2
-    fi
-}
-
 if [ -n "$SOURCE" ]; then
     case " $EXTRA " in
         *" --sdk="*) echo "Give either --sdk or --source, not both" >&2; exit 2 ;;
@@ -129,26 +116,47 @@ if [ -n "$SOURCE" ]; then
     given=$SOURCE
     SOURCE=$(cd "$OLDPWD" && cd "$given" 2>/dev/null && pwd) || { echo "No sources in $given" >&2; exit 2; }
 fi
-if [ -n "$SOURCE" ] && [ -z "$LIST" ]; then
-    checked=
-    while read -r bug repeat env; do
-        if [ -n "$BUGS" ]; then
-            case " $BUGS " in
-                *" $bug "*) ;;
-                *) continue ;;
+
+# With --build, the first run of each distribution copies the sources to its workspace
+# and builds them. Without it, the runs take the build of the sources as it is, which
+# has to load in the containers: one made on a newer distribution may not
+if [ -n "$BUILD_ARGS" ]; then
+    [ -z "$SOURCE" ] || BUILD_ARGS="--source=$SOURCE$BUILD_ARGS"
+elif [ -n "$SOURCE" ]; then
+    sdk=$SOURCE/build/sdk
+    if ! [ -f "$sdk/lib/libglassgtk3.so" ]; then
+        echo "$SOURCE has no build, in build/sdk (--build copies the sources to the workspaces and builds them)" >&2
+        exit 2
+    fi
+    EXTRA="$EXTRA --sdk=$sdk"
+    if [ -z "$LIST" ]; then
+        checked=
+        while read -r bug repeat env; do
+            if [ -n "$BUGS" ]; then
+                case " $BUGS " in
+                    *" $bug "*) ;;
+                    *) continue ;;
+                esac
+            fi
+            distro=${env%% *}
+            distro=${distro#--distros=}
+            case " $checked " in
+                *" $distro "*) continue ;;
             esac
-        fi
-        distro=${env%% *}
-        distro=${distro#--distros=}
-        case " $checked " in
-            *" $distro "*) continue ;;
-        esac
-        checked="$checked $distro"
-        check_workspace "$(echo "$distro" | tr ':' '-')" "$distro"
-    done <<EOF
+            checked="$checked $distro"
+            missing=$(toolbox run --container "jfx-tester-$(echo "$distro" | tr ':' '-')" \
+                sh -c 'ldd "$1" 2>&1 | grep "not found"' sh "$sdk/lib/libglassgtk3.so" < /dev/null)
+            if [ -n "$missing" ]; then
+                echo "The build in $sdk does not load on $distro:" >&2
+                echo "$missing" >&2
+                echo "It has to be built on $distro or an older distribution (--build copies the sources to the workspaces and builds them)" >&2
+                exit 2
+            fi
+        done <<EOF
 $(tests)
 EOF
-    echo "Using the builds of the workspaces, of the sources of $SOURCE"
+        echo "Using the build of $sdk"
+    fi
 fi
 
 if [ -z "$LIST" ]; then
@@ -181,10 +189,15 @@ while read -r bug repeat env; do
     esac
     [ -z "$SESSION" ] || [ "$SESSION" = "$session" ] || continue
     distro=${env%% *}
+    build=
+    case " $BUILT " in
+        *" $distro "*) ;;
+        *) build=$BUILD_ARGS; BUILT="$BUILT $distro" ;;
+    esac
     props="-Dtests.run=true -Dtests.exit=true -Dtests.bugs=$bug"
     [ "$repeat" = 0 ] || props="$props -Dtests.repeat=$repeat"
     if [ -n "$LIST" ]; then
-        echo "./jfx-tester $env$EXTRA --manual=manual/JDK8354943Test.java --timeout=1800 --jvm-args=\"$props\""
+        echo "./jfx-tester${build:+ $build} $env$EXTRA --manual=manual/JDK8354943Test.java --timeout=1800 --jvm-args=\"$props\""
         continue
     fi
     n=$((n + 1))
@@ -192,8 +205,8 @@ while read -r bug repeat env; do
     log=$LOGS/$name.log
     echo "== $n: $bug, $env$EXTRA"
     # shellcheck disable=SC2086
-    { ./jfx-tester $env $EXTRA --results="$LOGS" --manual=manual/JDK8354943Test.java --timeout=1800 \
-        --jvm-args="$props" < /dev/null; echo $? > "$log.status"; } 2>&1 | tee "$log" | grep --line-buffered -E '^(OK|FAIL|SKIP) +JDK|^RUN +JDK|^TESTS'
+    { ./jfx-tester $build $env $EXTRA --results="$LOGS" --manual=manual/JDK8354943Test.java --timeout=1800 \
+        --jvm-args="$props" < /dev/null; echo $? > "$log.status"; } 2>&1 | tee "$log" | grep --line-buffered -E '^(OK|FAIL|SKIP) +JDK|^RUN +JDK|^TESTS|^Copying|^Building'
     status=$(cat "$log.status")
     rm -f "$log.status"
     result=$(grep -E '^TESTS' "$log" | tail -1 | sed 's/^TESTS //')
