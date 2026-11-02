@@ -59,12 +59,14 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Scanner;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * The tests of JDK-8354943, on window sizing, positioning and state in the
@@ -84,6 +86,8 @@ import java.util.function.Consumer;
  * <li>https://bugs.openjdk.org/browse/JDK-8316425</li>
  * </ul>
  * It needs only this file. It shows where each bug was reported and where it runs.
+ * The bugs of the first windows of an application run in a new process of their
+ * own, as their reports do, without any other window: most do not show otherwise.
  * A test passes when the window reaches the state
  * that it should and keeps it for a second, as some of these windows reach it
  * and then leave it. Some of these bugs are intermittent: those tests run
@@ -103,6 +107,7 @@ public class JDK8354943Test extends Application {
 
     private static final String JBS = "https://bugs.openjdk.org/browse/";
     private static final String FIX = "JDK-8354943";
+    private static final int PROCESS_TIMEOUT = 60;
     private static final int REPEAT = Math.max(1, Integer.getInteger("tests.repeat", 5));
     /** How long a window has to reach a state, and to keep it. */
     private static final long WAIT = 5000, HOLD = 1000;
@@ -127,7 +132,11 @@ public class JDK8354943Test extends Application {
         if (home != null) {
             System.setProperty("user.home", home);
         }
-        launch(args);
+        if (System.getProperty("tests.process") != null) {
+            Application.launch(NewProcess.class, args);
+        } else {
+            launch(args);
+        }
     }
 
     private enum Status {
@@ -207,18 +216,19 @@ public class JDK8354943Test extends Application {
     }
 
     private final List<Bug> bugs = new ArrayList<>();
+    private Stage window;
     private final List<Stage> stages = new ArrayList<>();
     private final List<Button> runButtons = new ArrayList<>();
     private final Label total = new Label("Not run");
     private final Button stop = new Button("Stop");
     private final VBox list = new VBox(14);
     private final ScrollPane scroll = new ScrollPane(list);
-    private Robot robot;
     private volatile boolean running;
     private volatile boolean stopping;
 
     @Override
     public void start(Stage stage) {
+        window = stage;
         defineChecks();
         Hyperlink fix = link(FIX);
         Label title = new Label("Window sizing, positioning and state in glass-gtk");
@@ -418,30 +428,28 @@ public class JDK8354943Test extends Application {
                 "jfx21, jfx25. Linux Mint 22.1 (base Ubuntu 24.04), Cinnamon 6.4.8, Muffin 6.4.1, GTK "
                 + "3.24.41, kernel 6.8, two 1920 × 1080 monitors. Not seen on Ubuntu 24.04, Xorg or Wayland")
                 .on(CINNAMON_XORG + " " + SMALLER_SECOND_MONITOR, 0)
-                .check("Restore maximized, on each screen", "Maximizes a window on a screen and keeps its position and "
-                        + "size, then shows a new window with them and setMaximized(true). Its title bar stays on the "
-                        + "screen. It needs a second monitor smaller than the first (--monitors=1920x1080,1280x720)", 1,
-                        this::restoreMaximized);
+                .check("Restore maximized, on the second screen", "The Test of the report: a process maximizes a "
+                        + "window on the second screen and keeps its position and size, and the next one sets them "
+                        + "with setMaximized(true) before show. It stays within the screen. It needs a second monitor "
+                        + "smaller than the first (--monitors=1920x1080,1280x720)", 1, this::restoreMaximized);
 
         new Bug("JDK-8366009", "Stage does not always enter full screen when shown with fullScreen set to true",
                 "jfx25. Ubuntu 24.04, X.org and Wayland, intermittent. Works on Ubuntu 22.04")
                 .on(GNOME_WAYLAND, 20)
                 .on(GNOME_XORG, 20)
-                .check("Shown in full screen", "HelloFullscreen: setFullScreen(true), setScene, show", REPEAT, () -> {
-                    Stage s = open(600, 450, st -> {
-                        st.setFullScreen(true);
-                        st.show();
-                    });
-                    settle("full screen", () -> notFullScreen(s));
-                    return size(s);
-                });
+                .check("Shown in full screen", "HelloFullscreen, in a new process: setFullScreen(true), setScene, "
+                        + "show", REPEAT, () -> inNewProcess("fullscreen"));
 
         new Bug("JDK-8367893", "StageFocusTest fails on some Linux systems",
                 "jfx26. Ubuntu 24.04, Wayland (XWayland); also Ubuntu 22.04, X.org, 2 of 3 runs")
                 .on(GNOME_WAYLAND, 0)
                 .on(UBUNTU_22_XORG, 0)
-                .check("Focus after show", "An undecorated stage is focused when shown, on top, and gets the keys of "
-                        + "the Robot", REPEAT, this::focusAfterShow);
+                .check("Focus after show, primary stage", "StageFocusTest, in a new process: an undecorated stage is "
+                        + "focused when shown, on top, and gets the keys of the Robot", REPEAT,
+                        () -> robotInNewProcess("focus"))
+                .check("Focus after show, new stage", "As above, with a new stage after the primary one was shown and "
+                        + "hidden, the second run of the test in the report", REPEAT,
+                        () -> robotInNewProcess("focus-new-stage"));
 
         new Bug("JDK-8321624", "DualWindowTest fails intermittently on Linux",
                 "jfx22. Linux, in automated runs; reproduced on an Ubuntu 22.04 VM, once in 5 to 10 runs")
@@ -449,10 +457,8 @@ public class JDK8354943Test extends Application {
                 .on(GNOME_XORG, 20)
                 .on(UBUNTU_22_WAYLAND, 20)
                 .on(UBUNTU_22_XORG, 20)
-                .check("Two stages moved when shown", "DualWindowTest: both stages get their position in a "
-                        + "Platform.runLater from WINDOW_SHOWN", REPEAT, () -> dualWindows(true))
-                .check("Two stages moved before show", "As above, with the position set before show", REPEAT,
-                        () -> dualWindows(false));
+                .check("Two stages moved when shown", "DualWindowTest, in a new process: both stages get their "
+                        + "position in a Platform.runLater from WINDOW_SHOWN", REPEAT, () -> inNewProcess("dual"));
 
         new Bug("JDK-8353556", "RestoreSceneSizeTest fails in Ubuntu 24.04",
                 "jfx25. Ubuntu 24.04, Wayland and Xorg. Not on Ubuntu 22.04")
@@ -555,15 +561,16 @@ public class JDK8354943Test extends Application {
         new Bug("JDK-8337400", "Initial window position is not centered on Ubuntu 24.04 / Xorg",
                 "jfx23. Ubuntu 24.04, GNOME, only on Xorg")
                 .on(GNOME_XORG, 0)
-                .check("Centered when shown", "PositionTest: a 640 × 480 scene, with no position. It shows where "
-                        + "Stage.centerOnScreen() puts it", REPEAT, this::centeredWhenShown);
+                .check("Centered when shown", "PositionTest, in a new process: a 640 × 480 scene, with no position. It "
+                        + "shows where Stage.centerOnScreen() puts it", REPEAT, () -> inNewProcess("position"));
 
         new Bug("JDK-8316891", "Intermittent test failure in IconifyTest.canIconifyDecoratedStage",
                 "jfx21. Linux, in nightly test runs, no distribution given")
                 .on(GNOME_WAYLAND, 20)
                 .on(GNOME_XORG, 20)
-                .check("Iconify a decorated stage", "IconifyTest: a stage above another. Iconified, the one below "
-                        + "shows on the screen, and deiconified it is above it again", REPEAT, this::iconify);
+                .check("Iconify a decorated stage", "IconifyTest.canIconifyDecoratedStage, in a new process: a "
+                        + "decorated stage always on top of an undecorated one. Iconified, the one below shows on the "
+                        + "screen, and deiconified it is above it again", REPEAT, () -> robotInNewProcess("iconify"));
 
         new Bug("JDK-8316425", "Stage.setMaximized() before show() does not persist",
                 "jfx21. Fedora 38 (Linux 6.4) VM and Ubuntu 23.04, X11, not on Wayland. Fine on Ubuntu "
@@ -639,101 +646,60 @@ public class JDK8354943Test extends Application {
             throw new Skip("It needs a second monitor smaller than the first (--monitors=1920x1080,1280x720), "
                     + "they are " + bounds(firstScreen) + " and " + bounds(secondScreen));
         }
-        StringBuilder sb = new StringBuilder();
-        for (Screen screen : screens) {
-            Rectangle2D v = screen.getVisualBounds();
-            Stage first = open(400, 300, st -> {
-                st.setX(v.getMinX() + 60);
-                st.setY(v.getMinY() + 60);
-                st.show();
-            });
-            settle("shown on " + bounds(v), () -> near(first.getX(), v.getMinX() + 60, 60)
-                    ? null : "it is at " + position(first));
-            fx(() -> {
-                first.setMaximized(true);
-                return null;
-            });
-            settle("maximized on " + bounds(v), () -> notMaximized(first));
-            double[] saved = fx(() -> new double[] {first.getX(), first.getY(), first.getWidth(), first.getHeight()});
-            closeStages();
-
-            Stage restored = open(400, 300, st -> {
-                st.setX(saved[0]);
-                st.setY(saved[1]);
-                st.setWidth(saved[2]);
-                st.setHeight(saved[3]);
-                st.setMaximized(true);
-                st.show();
-            });
-            settle("restored maximized on " + bounds(v), () -> {
-                Rectangle2D b = screen.getBounds();
-                if (!restored.isMaximized()) {
-                    return "isMaximized is false";
-                }
-                boolean inside = restored.getX() >= b.getMinX() - 1 && restored.getY() >= b.getMinY() - 1
-                        && restored.getX() + restored.getWidth() <= b.getMaxX() + 1
-                        && restored.getY() + restored.getHeight() <= b.getMaxY() + 1;
-                return inside ? null : "the window is " + size(restored) + " at " + position(restored)
-                        + ", past the screen " + bounds(b);
-            });
-            sb.append(sb.isEmpty() ? "" : ", ").append(fx(() -> size(restored)));
-            closeStages();
+        Path state = Files.createTempFile("jfx-tester-window", ".state");
+        try {
+            String property = "-Dtests.state=" + state;
+            inNewProcess("maximize", property);
+            return inNewProcess("restore", property);
+        } finally {
+            Files.deleteIfExists(state);
         }
-        return sb.toString();
     }
 
-    private String focusAfterShow() throws Exception {
+    private String robotInNewProcess(String name) throws Exception {
         requireRobot();
-        boolean[] pressed = {false};
-        Color fill = Color.rgb(0, 200, 0);
-        Stage s = fx(() -> {
-            Stage st = new Stage(StageStyle.UNDECORATED);
-            // A Group: the root style of a Pane would paint over the fill
-            Scene scene = new Scene(new Group(), 200, 200, fill);
-            scene.setOnKeyPressed(e -> pressed[0] |= e.getCode() == KeyCode.A);
-            st.setScene(scene);
-            st.setX(100);
-            st.setY(100);
-            stages.add(st);
-            st.show();
-            return st;
-        });
-        settle("focused", () -> s.isFocused() ? null : "isFocused is false");
-        awaitColor("on top", s, fill);
-        fx(() -> {
-            robot().keyPress(KeyCode.A);
-            robot().keyRelease(KeyCode.A);
-            return null;
-        });
-        await("the key of the Robot", () -> pressed[0] ? null : "no key event: focused " + s.isFocused());
-        return "focused, on top, key received";
+        return inNewProcess(name);
     }
 
-    private String dualWindows(boolean whenShown) throws Exception {
-        double[][] at = {{100, 100}, {400, 120}};
-        Stage[] two = new Stage[2];
-        for (int i = 0; i < 2; i++) {
-            double x = at[i][0], y = at[i][1];
-            two[i] = open(200, 200, st -> {
-                if (whenShown) {
-                    st.addEventHandler(WindowEvent.WINDOW_SHOWN, e -> Platform.runLater(() -> {
-                        st.setX(x);
-                        st.setY(y);
-                    }));
-                } else {
-                    st.setX(x);
-                    st.setY(y);
+    /** Runs a test in a new process, with no window of this one on the desktop, and gives its result. */
+    private String inNewProcess(String name, String... properties) throws Exception {
+        boolean hidden = fx(() -> {
+            if (!window.isShowing()) {
+                return false;
+            }
+            Platform.setImplicitExit(false);
+            window.hide();
+            return true;
+        });
+        if (hidden) {
+            Thread.sleep(300);
+        }
+        ProcessHandle.Info self = ProcessHandle.current().info();
+        List<String> command = new ArrayList<>();
+        command.add(self.command().orElseThrow());
+        command.add("-Dtests.process=" + name);
+        command.addAll(List.of(properties));
+        command.addAll(List.of(self.arguments().orElseThrow()));
+        Path output = Files.createTempFile("jfx-tester-process", ".out");
+        try {
+            Process process = new ProcessBuilder(command).redirectOutput(output.toFile())
+                    .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+            if (!process.waitFor(PROCESS_TIMEOUT, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+                throw new Failure("The process did not end in " + PROCESS_TIMEOUT + " s");
+            }
+            for (String line : Files.readAllLines(output)) {
+                if (line.startsWith(NewProcess.OK)) {
+                    return line.substring(NewProcess.OK.length());
                 }
-                st.show();
-            });
+                if (line.startsWith(NewProcess.FAIL)) {
+                    throw new Failure(line.substring(NewProcess.FAIL.length()));
+                }
+            }
+            throw new Failure("The process ended with " + process.exitValue() + ", without a result");
+        } finally {
+            Files.deleteIfExists(output);
         }
-        for (int i = 0; i < 2; i++) {
-            Stage st = two[i];
-            double x = at[i][0], y = at[i][1];
-            settle("stage " + (i + 1) + " at " + num(x) + ", " + num(y), () -> near(st.getX(), x, 1)
-                    && near(st.getY(), y, 1) ? null : "it is at " + position(st));
-        }
-        return "at " + fx(() -> position(two[0])) + " and " + fx(() -> position(two[1]));
     }
 
     private String restoreSceneSize(boolean before) throws Exception {
@@ -810,54 +776,6 @@ public class JDK8354943Test extends Application {
             return null;
         });
         return size(s) + ", scene " + sceneSize(s);
-    }
-
-    private String centeredWhenShown() throws Exception {
-        Stage s = open(640, 480, Stage::show);
-        settle("centered", () -> {
-            Rectangle2D v = Screen.getPrimary().getVisualBounds();
-            // What Window.centerOnScreen() does
-            double x = v.getMinX() + (v.getWidth() - s.getWidth()) / 2;
-            double y = v.getMinY() + (v.getHeight() - s.getHeight()) / 3;
-            return near(s.getX(), x, BOUNDS_DELTA) && near(s.getY(), y, BOUNDS_DELTA) ? null
-                    : "it is at " + position(s) + ", centered is about " + num(x) + ", " + num(y);
-        });
-        return "at " + fx(() -> position(s));
-    }
-
-    private String iconify() throws Exception {
-        requireRobot();
-        Color bottomColor = Color.LIME, topColor = Color.RED;
-        Stage bottom = filled(StageStyle.DECORATED, bottomColor);
-        settle("the stage below shown", () -> bottom.isShowing() ? null : "not showing");
-        awaitColor("the stage below", bottom, bottomColor);
-        Stage top = filled(StageStyle.DECORATED, topColor);
-        awaitColor("the stage above", top, topColor);
-        fx(() -> {
-            top.setIconified(true);
-            return null;
-        });
-        settle("iconified", () -> top.isIconified() ? null : "isIconified is false");
-        awaitColor("the stage below, with the other iconified", bottom, bottomColor);
-        fx(() -> {
-            top.setIconified(false);
-            return null;
-        });
-        settle("deiconified", () -> top.isIconified() ? "isIconified is true" : null);
-        awaitColor("the stage above again", top, topColor);
-        return "iconified and deiconified";
-    }
-
-    private Stage filled(StageStyle style, Color fill) throws Exception {
-        return fx(() -> {
-            Stage st = new Stage(style);
-            st.setScene(new Scene(new Group(), 300, 300, fill));
-            st.setX(100);
-            st.setY(100);
-            stages.add(st);
-            st.show();
-            return st;
-        });
     }
 
     // ---------------------------------------------------------------------
@@ -1011,27 +929,6 @@ public class JDK8354943Test extends Application {
         }
     }
 
-    private void awaitColor(String what, Stage s, Color expected) throws Exception {
-        await(what + " on the screen", () -> {
-            Scene scene = s.getScene();
-            Point2D center = scene.getRoot().localToScreen(scene.getWidth() / 2, scene.getHeight() / 2);
-            if (center == null) {
-                return "not on a screen";
-            }
-            Color c = robot().getPixelColor(center.getX(), center.getY());
-            boolean same = near(c.getRed(), expected.getRed(), 0.07) && near(c.getGreen(), expected.getGreen(), 0.07)
-                    && near(c.getBlue(), expected.getBlue(), 0.07);
-            return same ? null : "the pixel is " + c + ", expected " + expected;
-        });
-    }
-
-    private Robot robot() {
-        if (robot == null) {
-            robot = new Robot();
-        }
-        return robot;
-    }
-
     private static void requireRobot() {
         if (!Boolean.parseBoolean(System.getProperty("tests.robot", "true"))) {
             throw new Skip("The Robot is turned off with -Dtests.robot=false");
@@ -1113,6 +1010,7 @@ public class JDK8354943Test extends Application {
         String firstFailure = null, result = null, skip = null;
         for (int i = 0; i < c.runs && !stopping && skip == null; i++) {
             runs++;
+            System.out.printf("RUN  %s / %s: %d of %d%n", c.bug.id, c.name, runs, c.runs);
             try {
                 result = c.body.run();
             } catch (Skip e) {
@@ -1129,6 +1027,17 @@ public class JDK8354943Test extends Application {
                 failures++;
             }
         }
+        try {
+            fx(() -> {
+                if (!window.isShowing()) {
+                    window.show();
+                    Platform.setImplicitExit(true);
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            failures++;
+        }
         Status status = skip != null ? Status.SKIP : failures > 0 ? Status.FAIL : Status.OK;
         String text;
         if (status == Status.SKIP) {
@@ -1142,5 +1051,261 @@ public class JDK8354943Test extends Application {
         System.out.printf("%-4s %s / %s: %s (%d ms)%n", status, c.bug.id, c.name, text,
                 (System.nanoTime() - start) / 1_000_000);
         Platform.runLater(() -> show(c, status, text));
+    }
+
+    /**
+     * A test as a process of its own, whose first windows are the ones of the report. It prints its result, one line
+     * that starts with OK or FAIL.
+     */
+    public static final class NewProcess extends Application {
+        static final String OK = "OK: ";
+        static final String FAIL = "FAIL: ";
+
+        @Override
+        public void start(Stage stage) throws Exception {
+            later(PROCESS_TIMEOUT * 1000 - 10000, () -> fail("Timed out"));
+            Platform.setImplicitExit(false);
+            switch (System.getProperty("tests.process")) {
+                case "maximize" -> maximize(stage);
+                case "restore" -> restore(stage);
+                case "fullscreen" -> fullscreen(stage);
+                case "focus" -> focus(stage);
+                case "focus-new-stage" -> focusNewStage(stage);
+                case "dual" -> dual(stage);
+                case "position" -> centered(stage);
+                case "iconify" -> iconify();
+                default -> fail("Unknown test");
+            }
+        }
+
+        private static void ok(String result) {
+            end(OK + result);
+        }
+
+        private static void fail(String result) {
+            end(FAIL + result);
+        }
+
+        private static void end(String line) {
+            System.out.println(line);
+            System.out.flush();
+            Runtime.getRuntime().halt(0);
+        }
+
+        private static void later(long millis, Runnable action) {
+            Thread thread = new Thread(() -> {
+                try {
+                    Thread.sleep(millis);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                Platform.runLater(action);
+            });
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        /** Ends the test when there is no problem for a second, or with the problem it has after some seconds. */
+        private static void settle(Supplier<String> problem, Runnable then) {
+            settle(problem, then, System.currentTimeMillis() + WAIT, 0);
+        }
+
+        private static void settle(Supplier<String> problem, Runnable then, long deadline, long since) {
+            later(50, () -> {
+                long now = System.currentTimeMillis();
+                String wrong = problem.get();
+                if (wrong != null) {
+                    if (now > deadline) {
+                        fail(wrong);
+                    }
+                    settle(problem, then, deadline, 0);
+                } else if (since > 0 && now - since >= HOLD) {
+                    then.run();
+                } else {
+                    settle(problem, then, deadline, since > 0 ? since : now);
+                }
+            });
+        }
+
+        /** The steps of the Test of JDK-8365201: the first run */
+        private static void maximize(Stage stage) {
+            Rectangle2D second = Screen.getScreens().get(1).getBounds();
+            stage.setScene(new Scene(new Pane(), 400, 300));
+            stage.setX(second.getMinX() + 60);
+            stage.setY(second.getMinY() + 60);
+            stage.show();
+            settle(() -> stage.getX() >= second.getMinX() ? null : "it is at " + position(stage) + ", not on "
+                    + bounds(second), () -> {
+                stage.setMaximized(true);
+                settle(() -> stage.isMaximized() ? null : "isMaximized is false", () -> {
+                    try {
+                        Files.writeString(Path.of(System.getProperty("tests.state")), String.format(Locale.ROOT,
+                                "%f %f %f %f", stage.getX(), stage.getY(), stage.getWidth(), stage.getHeight()));
+                    } catch (IOException e) {
+                        fail(e.toString());
+                    }
+                    ok("maximized at " + position(stage));
+                });
+            });
+        }
+
+        /** The next run of the Test of JDK-8365201, which restores the state before setScene and show */
+        private static void restore(Stage stage) throws IOException {
+            Rectangle2D second = Screen.getScreens().get(1).getBounds();
+            Scanner saved = new Scanner(Files.readString(Path.of(System.getProperty("tests.state")))).useLocale(Locale.ROOT);
+            stage.setX(saved.nextDouble());
+            stage.setY(saved.nextDouble());
+            stage.setWidth(saved.nextDouble());
+            stage.setHeight(saved.nextDouble());
+            stage.setMaximized(true);
+            stage.setScene(new Scene(new Pane()));
+            stage.show();
+            settle(() -> {
+                if (!stage.isMaximized()) {
+                    return "isMaximized is false";
+                }
+                boolean inside = stage.getX() >= second.getMinX() - 1 && stage.getY() >= second.getMinY() - 1
+                        && stage.getX() + stage.getWidth() <= second.getMaxX() + 1
+                        && stage.getY() + stage.getHeight() <= second.getMaxY() + 1;
+                return inside ? null : "the window is " + size(stage) + " at " + position(stage) + ", past the screen "
+                        + bounds(second);
+            }, () -> ok(size(stage) + " at " + position(stage)));
+        }
+
+        /** HelloFullscreen, of JDK-8366009 */
+        private static void fullscreen(Stage stage) {
+            stage.setFullScreen(true);
+            stage.setScene(new Scene(new Group(), 600, 450, Color.LIGHTGREEN));
+            stage.show();
+            settle(() -> notFullScreen(stage), () -> ok(sceneSize(stage)));
+        }
+
+        /** StageFocusTest of JDK-8367893, with the primary stage */
+        private static void focus(Stage stage) {
+            boolean[] pressed = {false};
+            Scene scene = new Scene(new Group(), 200, 200, Color.LIGHTGREEN);
+            scene.setOnKeyPressed(e -> pressed[0] |= e.getCode() == KeyCode.A);
+            stage.initStyle(StageStyle.UNDECORATED);
+            stage.setScene(scene);
+            stage.setX(100);
+            stage.setY(100);
+            stage.show();
+            Platform.runLater(() -> {
+                if (!stage.isFocused()) {
+                    fail("isFocused is false after show");
+                }
+                later(500, () -> {
+                    Robot robot = new Robot();
+                    Color c = robot.getPixelColor(200, 200);
+                    if (!near(c.getRed(), Color.LIGHTGREEN.getRed(), 0.07)
+                            || !near(c.getGreen(), Color.LIGHTGREEN.getGreen(), 0.07)) {
+                        fail("Not on top: the pixel is " + c);
+                    }
+                    robot.keyPress(KeyCode.A);
+                    robot.keyRelease(KeyCode.A);
+                    later(2000, () -> {
+                        if (pressed[0]) {
+                            ok("focused, on top, key received");
+                        }
+                        fail("The stage did not receive the key of the Robot: focused " + stage.isFocused());
+                    });
+                });
+            });
+        }
+
+        /** StageFocusTest of JDK-8367893, whose second run takes a new stage after the primary one was hidden */
+        private static void focusNewStage(Stage primary) {
+            primary.initStyle(StageStyle.UNDECORATED);
+            primary.setScene(new Scene(new Group(), 200, 200, Color.LIGHTGREEN));
+            primary.setX(100);
+            primary.setY(100);
+            primary.show();
+            later(1000, () -> {
+                primary.hide();
+                focus(new Stage());
+            });
+        }
+
+        /** DualWindowTest, of JDK-8321624 */
+        private static void dual(Stage first) {
+            Stage second = new Stage();
+            double[][] at = {{100, 100}, {400, 100}};
+            Stage[] two = {first, second};
+            for (int i = 0; i < 2; i++) {
+                Stage st = two[i];
+                double x = at[i][0], y = at[i][1];
+                st.setScene(new Scene(new Pane(), 200, 200));
+                st.addEventHandler(WindowEvent.WINDOW_SHOWN, e -> Platform.runLater(() -> {
+                    st.setX(x);
+                    st.setY(y);
+                }));
+                st.show();
+            }
+            settle(() -> {
+                for (int i = 0; i < 2; i++) {
+                    if (!near(two[i].getX(), at[i][0], 1) || !near(two[i].getY(), at[i][1], 1)) {
+                        return "stage " + (i + 1) + " is at " + position(two[i]) + ", not at " + num(at[i][0]) + ", "
+                                + num(at[i][1]);
+                    }
+                }
+                return null;
+            }, () -> ok("at " + position(first) + " and " + position(second)));
+        }
+
+        /** PositionTest, attached to JDK-8337400 */
+        private static void centered(Stage stage) {
+            stage.setScene(new Scene(new Pane(), 640, 480));
+            stage.show();
+            settle(() -> {
+                Rectangle2D v = Screen.getPrimary().getVisualBounds();
+                // What Window.centerOnScreen() does
+                double x = v.getMinX() + (v.getWidth() - stage.getWidth()) / 2;
+                double y = v.getMinY() + (v.getHeight() - stage.getHeight()) / 3;
+                return near(stage.getX(), x, BOUNDS_DELTA) && near(stage.getY(), y, BOUNDS_DELTA) ? null
+                        : "it is at " + position(stage) + ", centered is about " + num(x) + ", " + num(y);
+            }, () -> ok("at " + position(stage)));
+        }
+
+        /** IconifyTest.canIconifyDecoratedStage, of JDK-8316891, where the primary stage does not show */
+        private static void iconify() {
+            Stage bottom = new Stage(StageStyle.UNDECORATED);
+            bottom.setScene(new Scene(new Pane(), 300, 300, Color.LIME));
+            bottom.setX(0);
+            bottom.setY(0);
+            bottom.show();
+            Stage top = new Stage(StageStyle.DECORATED);
+            top.setAlwaysOnTop(true);
+            top.setScene(new Scene(new Pane(), 300, 300, Color.RED));
+            top.setX(0);
+            top.setY(0);
+            top.show();
+            later(1000, () -> {
+                Robot robot = new Robot();
+                expect(robot, Color.RED, "with the stage above shown");
+                top.setIconified(true);
+                later(1000, () -> {
+                    if (!top.isIconified()) {
+                        fail("isIconified is false");
+                    }
+                    expect(robot, Color.LIME, "with the stage above iconified");
+                    top.setIconified(false);
+                    later(1000, () -> {
+                        if (top.isIconified()) {
+                            fail("isIconified is true");
+                        }
+                        expect(robot, Color.RED, "with the stage above deiconified");
+                        ok("iconified and deiconified");
+                    });
+                });
+            });
+        }
+
+        private static void expect(Robot robot, Color expected, String when) {
+            Color c = robot.getPixelColor(100, 100);
+            if (!near(c.getRed(), expected.getRed(), 0.07) || !near(c.getGreen(), expected.getGreen(), 0.07)
+                    || !near(c.getBlue(), expected.getBlue(), 0.07)) {
+                fail("The pixel is " + c + " " + when + ", expected " + expected);
+            }
+        }
     }
 }

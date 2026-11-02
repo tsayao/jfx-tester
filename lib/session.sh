@@ -856,7 +856,9 @@ EOF
 # in user.home, and get the options of JT_JVM_ARGS. Their results go to
 # directories of the environment, as the environments of a distribution share
 # the workspace and can run at the same time: the JUnit reports and a log of
-# each test class in JT_LOGS, and the HTML report in JT_REPORT
+# each test class in JT_LOGS, and the HTML report in JT_REPORT. A PROGRESS line
+# follows each test class of the system tests: their total is an estimate, the
+# classes with tests in the sources that the filters of the run take
 cat > "$JT_LOGS/jfx-tester.init.gradle" <<'EOF'
 import org.gradle.api.tasks.testing.TestDescriptor
 import org.gradle.api.tasks.testing.TestListener
@@ -895,6 +897,37 @@ allprojects {
             }
         }
 
+        def systemTests = project.path == ':systemTests'
+        def classes = [] as Set
+        def total = 0, passed = 0, failed = 0, skipped = 0, started = 0L
+        doFirst {
+            started = System.currentTimeMillis()
+            def regex = { String p -> ~('^' + p.split(/\*/, -1).collect { java.util.regex.Pattern.quote(it) }.join('.*') + '$') }
+            def includes = (filter.includePatterns + filter.commandLineIncludePatterns).collect { regex(it) }
+            def includePrefixes = filter.includePatterns + filter.commandLineIncludePatterns
+            def excludes = filter.excludePatterns.collect { regex(it) }
+            def root = project.file('src/test/java')
+            project.fileTree(root) { include '**/*.java' }.each { File f ->
+                def name = root.toPath().relativize(f.toPath()).toString().replace('.java', '').replace('/', '.')
+                if (excludes.any { name ==~ it } || !(f.text =~ /@(Test|ParameterizedTest|RepeatedTest)\b/)) {
+                    return
+                }
+                if (includes.isEmpty() || includes.any { name ==~ it } || includePrefixes.any { it.startsWith(name + '.') }) {
+                    total++
+                }
+            }
+        }
+        def progress = { String what ->
+            def done = classes.size()
+            def width = 20
+            def full = total > 0 ? Math.min(width, (int) (done * width / total)) : 0
+            def elapsed = (System.currentTimeMillis() - started) / 1000
+            def left = done > 0 && total > done ? (int) (elapsed * (total - done) / done) : 0
+            printf('PROGRESS %s [%s%s] %d/%d classes, %d passed, %d failed, %d skipped, %dm%02ds left  %s%n',
+                    env, '#' * full, '.' * (width - full), done, total, passed, failed, skipped,
+                    (int) (left / 60), (int) (left % 60), what)
+        }
+
         def tests = new File(logs, 'tests')
         def logOf = { TestDescriptor d ->
             tests.mkdirs()
@@ -907,11 +940,22 @@ allprojects {
         })
         addTestListener(new TestListener() {
             void beforeSuite(TestDescriptor d) {}
-            void afterSuite(TestDescriptor d, TestResult r) {}
+            void afterSuite(TestDescriptor d, TestResult r) {
+                // A class, and not the suites of its parameterized tests
+                if (systemTests && d.className != null && d.name == d.className) {
+                    classes << d.name
+                    progress("${d.name}: ${r.resultType}")
+                }
+            }
             void beforeTest(TestDescriptor d) {
                 logOf(d).append("==== ${d.name}\n")
             }
             void afterTest(TestDescriptor d, TestResult r) {
+                switch (r.resultType) {
+                    case TestResult.ResultType.SUCCESS: passed++; break
+                    case TestResult.ResultType.FAILURE: failed++; break
+                    default: skipped++
+                }
                 def text = "==== ${d.name}: ${r.resultType} (${r.endTime - r.startTime} ms)\n"
                 r.exceptions.each { e ->
                     def trace = new StringWriter()

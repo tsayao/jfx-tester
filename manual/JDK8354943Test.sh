@@ -31,16 +31,17 @@
 #
 #   --list       print the commands, without running them
 #   --ubuntu22   also the environments of Ubuntu 22.04, which need its container
-#                and a build of its workspace (--yes --source=DIR --build)
+#                and a build of its workspace
 #   --session=S  only the runs of this kind of session, wayland or xorg
 #   JDK-N        only these bugs
 #
-# Any other option goes to jfx-tester, such as --headless. --source, --build and
-# --clean go only to the first run of each distribution, which builds its
-# workspace for the others:
+# Any other option goes to jfx-tester, such as --headless or --sdk=DIR. It does not
+# build: the runs take the builds that the workspaces of the distributions have, or
+# the SDK of --sdk. --source=DIR only checks that the workspaces have those sources.
 #
-#   manual/JDK8354943Test.sh --source=$HOME/IdeaProjects/jfx --build --headless
-#   manual/JDK8354943Test.sh JDK-8353556 JDK-8316425
+#   manual/JDK8354943Test.sh --headless
+#   manual/JDK8354943Test.sh --source=$HOME/IdeaProjects/jfx2 --headless
+#   manual/JDK8354943Test.sh --sdk=$HOME/jfx/build/sdk --headless JDK-8353556
 #
 # All the runs share a folder, RESULTS/JDK8354943Test_YYYY-MM-DD_HH-MM-SS (results
 # without --results), with the output of each run as BUG-DISTRO-SESSION.log and its logs
@@ -85,22 +86,70 @@ tests() {
 LIST=
 WITH_UBUNTU22=
 BUGS=
-BUILD_ARGS=
 EXTRA=
 RESULTS=results
 SESSION=
+SOURCE=
 for a in "$@"; do
     case "$a" in
         --list) LIST=1 ;;
         --ubuntu22) WITH_UBUNTU22=1 ;;
         JDK-*) BUGS="$BUGS $a" ;;
-        --source=*|--build|--clean|--no-sync) BUILD_ARGS="$BUILD_ARGS $a" ;;
+        --source=*) SOURCE=${a#*=} ;;
+        --build|--clean|--no-sync)
+            echo "$a: this script does not build. Build each distribution with ./jfx-tester --source=DIR --build, then run it" >&2
+            exit 2 ;;
         --results=*) RESULTS=${a#*=} ;;
+        --work=*) WORK=${a#*=}; EXTRA="$EXTRA $a" ;;
         --session=wayland|--session=xorg) SESSION=${a#*=} ;;
         --session=*) echo "Unknown session: ${a#*=} (wayland or xorg)" >&2; exit 2 ;;
         *) EXTRA="$EXTRA $a" ;;
     esac
 done
+
+# The sources given, which the workspaces have to be built from: a build of the host
+# in DIR/build/sdk does not load in the containers, whose C library may be older
+check_workspace() {
+    workspace=${WORK:-$HOME/.cache/jfx-tester}/workspace/$1
+    glass=modules/javafx.graphics/src/main
+    if ! [ -f "$workspace/build/sdk/lib/libglassgtk3.so" ]; then
+        echo "$workspace has no build: build it with ./jfx-tester --source=$SOURCE --build --distros=$2" >&2
+        exit 2
+    fi
+    if ! diff -rq "$SOURCE/$glass" "$workspace/$glass" > /dev/null 2>&1; then
+        echo "$workspace was not built from $SOURCE: build it with ./jfx-tester --source=$SOURCE --build --distros=$2" >&2
+        exit 2
+    fi
+}
+
+if [ -n "$SOURCE" ]; then
+    case " $EXTRA " in
+        *" --sdk="*) echo "Give either --sdk or --source, not both" >&2; exit 2 ;;
+    esac
+    given=$SOURCE
+    SOURCE=$(cd "$OLDPWD" && cd "$given" 2>/dev/null && pwd) || { echo "No sources in $given" >&2; exit 2; }
+fi
+if [ -n "$SOURCE" ] && [ -z "$LIST" ]; then
+    checked=
+    while read -r bug repeat env; do
+        if [ -n "$BUGS" ]; then
+            case " $BUGS " in
+                *" $bug "*) ;;
+                *) continue ;;
+            esac
+        fi
+        distro=${env%% *}
+        distro=${distro#--distros=}
+        case " $checked " in
+            *" $distro "*) continue ;;
+        esac
+        checked="$checked $distro"
+        check_workspace "$(echo "$distro" | tr ':' '-')" "$distro"
+    done <<EOF
+$(tests)
+EOF
+    echo "Using the builds of the workspaces, of the sources of $SOURCE"
+fi
 
 if [ -z "$LIST" ]; then
     mkdir -p "$RESULTS" || exit 1
@@ -114,7 +163,6 @@ if [ -z "$LIST" ]; then
         LOGS=$LOGS_BASE-$c
     done
 fi
-BUILT=
 SUMMARY=
 FAILED=
 INTERRUPTED=
@@ -133,15 +181,10 @@ while read -r bug repeat env; do
     esac
     [ -z "$SESSION" ] || [ "$SESSION" = "$session" ] || continue
     distro=${env%% *}
-    build=
-    case " $BUILT " in
-        *" $distro "*) ;;
-        *) build=$BUILD_ARGS; BUILT="$BUILT $distro" ;;
-    esac
     props="-Dtests.run=true -Dtests.exit=true -Dtests.bugs=$bug"
     [ "$repeat" = 0 ] || props="$props -Dtests.repeat=$repeat"
     if [ -n "$LIST" ]; then
-        echo "./jfx-tester${build} $env$EXTRA --manual=manual/JDK8354943Test.java --timeout=1800 --jvm-args=\"$props\""
+        echo "./jfx-tester $env$EXTRA --manual=manual/JDK8354943Test.java --timeout=1800 --jvm-args=\"$props\""
         continue
     fi
     n=$((n + 1))
@@ -149,8 +192,8 @@ while read -r bug repeat env; do
     log=$LOGS/$name.log
     echo "== $n: $bug, $env$EXTRA"
     # shellcheck disable=SC2086
-    { ./jfx-tester $build $env $EXTRA --results="$LOGS" --manual=manual/JDK8354943Test.java --timeout=1800 \
-        --jvm-args="$props" < /dev/null; echo $? > "$log.status"; } 2>&1 | tee "$log" | grep -E '^(OK|FAIL|SKIP) +JDK|^TESTS'
+    { ./jfx-tester $env $EXTRA --results="$LOGS" --manual=manual/JDK8354943Test.java --timeout=1800 \
+        --jvm-args="$props" < /dev/null; echo $? > "$log.status"; } 2>&1 | tee "$log" | grep --line-buffered -E '^(OK|FAIL|SKIP) +JDK|^RUN +JDK|^TESTS'
     status=$(cat "$log.status")
     rm -f "$log.status"
     result=$(grep -E '^TESTS' "$log" | tail -1 | sed 's/^TESTS //')

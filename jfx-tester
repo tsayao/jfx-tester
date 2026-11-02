@@ -180,6 +180,10 @@
 # --parallel: the outcome of each, the tests that failed and its report. The
 # exit status is 1 when any of them fails.
 #
+# While the system tests run, a PROGRESS line follows each test class, with the
+# classes done and an estimate of the time left. With --parallel, the output has
+# only these lines of each environment.
+#
 # Examples:
 #   ./jfx-tester --source=$HOME/jfx
 #   ./jfx-tester --distros=fedora:44,ubuntu:24.04 --desktops=gnome,kde
@@ -920,6 +924,7 @@ summarize() {
 # A folder of its own for this run, also when another one starts in the same
 # second
 JOBS=
+WATCHERS=
 RUN_BASE=$RESULTS/$(date +%F_%H-%M-%S)
 RUN=$RUN_BASE
 n=1
@@ -936,7 +941,7 @@ DESKTOP_LIST=$(printf '%s' "$DESKTOPS" | tr ',' ' ')
 SUFFIX=
 [ -n "$MANUAL" ] && SUFFIX=-manual
 ENVIRONMENTS=
-trap 'trap "" INT TERM; kill $JOBS 2>/dev/null; summarize; exit 130' INT TERM
+trap 'trap "" INT TERM; kill $JOBS 2>/dev/null; pkill -P $$ -x tail 2>/dev/null; summarize; exit 130' INT TERM
 
 # The containers first, one after the other, as they may ask
 READY=
@@ -969,12 +974,16 @@ for ready in $READY; do
     if [ -n "$PARALLEL" ]; then
         mkdir -p "$LOGS/$CONTAINER_ID"
         echo "== $CONTAINER_ID: started, output in $LOGS/$CONTAINER_ID/console.log"
+        : > "$LOGS/$CONTAINER_ID/console.log"
         run_distribution > "$LOGS/$CONTAINER_ID/console.log" 2>&1 &
         JOBS="$JOBS $!"
+        tail -n 0 -f "$LOGS/$CONTAINER_ID/console.log" | grep --line-buffered '^PROGRESS ' &
+        WATCHERS="$WATCHERS $!"
     else
         run_distribution
     fi
 done
 [ -n "$JOBS" ] && wait $JOBS
+[ -n "$WATCHERS" ] && pkill -P $$ -x tail 2>/dev/null
 
 summarize
