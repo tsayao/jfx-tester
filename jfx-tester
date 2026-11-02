@@ -957,27 +957,118 @@ summarize() {
 }
 
 # Keeps the bars of the PROGRESS lines of the system tests below the output, one for
-# each environment, in a terminal
+# each environment, in a terminal, with colors and with a total for many of them.
+# A line each second moves them, and tells when an environment stopped moving
 start_bars() {
     [ -t 1 ] && [ -z "$MANUAL" ] || return 0
     BARS_FIFO=$RUN/progress.fifo
     mkfifo "$BARS_FIFO" || return 0
     columns=$(tput cols 2>/dev/null)
+    colors=0
+    [ -z "$NO_COLOR" ] && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ] && colors=1
+    unicode=0
+    [ "$(locale charmap 2>/dev/null)" = UTF-8 ] && unicode=1
     (trap '' INT
-     exec awk -v columns="${columns:-120}" '
+     exec awk -v columns="${columns:-120}" -v colors="$colors" -v unicode="$unicode" '
+        BEGIN {
+            if (unicode) {
+                spinner = 10; split("⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏", spin, " ")
+                split("▏ ▎ ▍ ▌ ▋ ▊ ▉", part, " ")
+                full_block = "█"; empty_block = "░"; pulse = "▒"
+                ok = "✓"; bad = "✗"; off = "⊘"; good_end = "✔"; bad_end = "✖"; warn = "⚠"; more = "…"
+            } else {
+                spinner = 4; split("| / - \\", spin, " ")
+                full_block = "#"; empty_block = "."; pulse = "="
+                ok = "+"; bad = "x"; off = "-"; good_end = "+"; bad_end = "x"; warn = "!"; more = "~"
+            }
+            # With no test for this long, in seconds: more than the timeout of a test
+            stalled_after = 180
+            width = 20
+        }
+        function color(code, text) {
+            return colors ? "\033[" code "m" text "\033[0m" : text
+        }
+        function repeat(text, n, result) {
+            result = ""
+            while (n-- > 0) result = result text
+            return result
+        }
+        function duration(seconds) {
+            if (seconds >= 3600) return int(seconds / 3600) "h" sprintf("%02d", int(seconds % 3600 / 60)) "m"
+            return int(seconds / 60) "m" sprintf("%02d", seconds % 60) "s"
+        }
+        function bar_of(e, exact, whole, eighths, used, at) {
+            if (!(e in total)) {
+                at = tick % (width - 2)
+                return color("2", repeat(empty_block, at)) color("36", repeat(pulse, 3)) color("2", repeat(empty_block, width - 3 - at))
+            }
+            exact = total[e] > 0 ? done[e] * width / total[e] : 0
+            if (exact > width) exact = width
+            whole = int(exact)
+            eighths = unicode ? int((exact - whole) * 8) : 0
+            used = whole + (eighths > 0)
+            return color(failed[e] > 0 ? "33" : "32", repeat(full_block, whole) (eighths > 0 ? part[eighths] : "")) color("2", repeat(empty_block, width - used))
+        }
+        function clip(text, room) {
+            if (room < 8) return ""
+            return length(text) > room ? more substr(text, length(text) - room + 2) : text
+        }
+        function line_of(e, finished, stalled, mark, shown, used, stats, numbers) {
+            finished = (e in total) && total[e] > 0 && done[e] >= total[e]
+            stalled = (e in total) && !finished && tick - moved[e] >= stalled_after
+            if (finished) mark = failed[e] > 0 ? color("31", bad_end) : color("32", good_end)
+            else if (stalled) mark = color("33", warn)
+            else mark = color("36", spin[tick % spinner + 1])
+            shown = sprintf("%-" name_width "s", e)
+            used = 2 + name_width + 1 + width + 1
+            if (!(e in total)) return mark " " shown " " bar_of(e) " " clip(what[e], columns - 1 - used)
+            numbers = sprintf("%3d%% %d/%d", percent[e], done[e], total[e])
+            stats = color("32", ok passed[e]) " " color(failed[e] > 0 ? "1;31" : "2", bad failed[e]) " " color("2", off skipped[e])
+            used += length(numbers) + 1 + length(passed[e] failed[e] skipped[e]) + 5
+            if (stalled) {
+                numbers = numbers " " stats " " color("33", "no test for " duration(tick - moved[e]))
+                used += 13 + length(duration(tick - moved[e]))
+            } else {
+                numbers = numbers " " stats " " color("2", left[e])
+                used += 1 + length(left[e])
+            }
+            return mark " " shown " " bar_of(e) " " numbers "  " color("2", clip(what[e], columns - 3 - used))
+        }
+        function total_line(i, e, p, f, s, ended) {
+            p = f = s = ended = 0
+            for (i = 1; i <= count; i++) {
+                e = order[i]
+                p += passed[e]; f += failed[e]; s += skipped[e]
+                if ((e in total) && total[e] > 0 && done[e] >= total[e]) ended++
+            }
+            return color("1", "  " ended "/" count " done") "  " color("32", ok p) " " color(f > 0 ? "1;31" : "2", bad f) " " color("2", off s) "  " color("2", duration(tick))
+        }
         function clear_bars() {
             if (drawn > 0) printf "\033[%dA\033[J", drawn
             drawn = 0
         }
         function draw_bars(i) {
             clear_bars()
-            for (i = 1; i <= count; i++) print substr(bars[order[i]], 1, columns - 1)
+            for (i = 1; i <= count; i++) print line_of(order[i])
             drawn = count
+            if (count > 1) {
+                print total_line()
+                drawn++
+            }
             fflush()
+        }
+        function forget(e) {
+            delete bars[e]; delete total[e]; delete done[e]; delete passed[e]; delete failed[e]
+            delete skipped[e]; delete percent[e]; delete left[e]; delete what[e]; delete moved[e]
+        }
+        /^JT_TICK$/ {
+            tick++
+            if (count > 0) draw_bars()
+            next
         }
         /^PROGRESS [^ ]+ -$/ {
             if ($2 in bars) {
-                delete bars[$2]
+                forget($2)
                 kept = 0
                 for (i = 1; i <= count; i++) if (order[i] in bars) order[++kept] = order[i]
                 count = kept
@@ -986,8 +1077,25 @@ start_bars() {
             next
         }
         /^PROGRESS / {
-            if (!($2 in bars)) order[++count] = $2
-            bars[$2] = substr($0, 10)
+            e = $2
+            if (!(e in bars)) {
+                order[++count] = e
+                if (length(e) > name_width) name_width = length(e)
+            }
+            bars[e] = 1
+            text = substr($0, length("PROGRESS ") + length(e) + 2)
+            sub(/^\[[#.]+\] +/, "", text)
+            percent[e] = text + 0
+            sub(/^[0-9]+% /, "", text)
+            if (split(text, n, /[\/ ,]+/) >= 10 && n[3] == "classes" && n[5] == "passed" && n[7] == "failed" && n[9] == "skipped") {
+                if (passed[e] != n[4] || failed[e] != n[6] || skipped[e] != n[8] || !(e in moved)) moved[e] = tick
+                total[e] = n[2] + 0; done[e] = n[1] + 0
+                passed[e] = n[4] + 0; failed[e] = n[6] + 0; skipped[e] = n[8] + 0
+                left[e] = n[10] " left"
+                if (total[e] <= done[e]) left[e] = ""
+                sub(/^.* left  /, "", text)
+            }
+            what[e] = text
             draw_bars()
             next
         }
@@ -998,12 +1106,15 @@ start_bars() {
         }') < "$BARS_FIFO" &
     BARS_PID=$!
     exec 3>&1 4>&2 > "$BARS_FIFO" 2>&1
+    (while sleep 1 > /dev/null; do echo JT_TICK; done) &
+    BARS_TICKS=$!
 }
 
 # Back to the terminal. The bars have the whole output when nothing writes to them
 # anymore, which an interrupted run does not wait for
 stop_bars() {
     [ -n "$BARS_PID" ] || return 0
+    kill "$BARS_TICKS" 2>/dev/null
     exec 1>&3 2>&4 3>&- 4>&-
     [ "$1" = interrupted ] && kill "$BARS_PID" 2>/dev/null
     wait "$BARS_PID" 2>/dev/null

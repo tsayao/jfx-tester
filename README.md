@@ -245,15 +245,18 @@ such as `fedora-44-gnome`.
 
 While the system tests run, a terminal shows a progress bar for each environment, from
 the copy and the build to the tests, with how many tests passed, failed and were
-skipped. With `--parallel`, the output has only the bars:
+skipped, and a total. With `--parallel`, the output has only the bars:
 
 ```
-ubuntu-26.04-gnome [####................]  20% 61/302 classes, 540 passed, 2 failed, 11 skipped, 41m10s left  test.javafx.stage.SizeToSceneTest: SUCCESS
-ubuntu-26.04-kde [##..................]  12% 37/302 classes, 301 passed, 0 failed, 4 skipped, 52m33s left  test.javafx.scene.RobotTest: SUCCESS
+⠹ ubuntu-26.04-gnome ████▏░░░░░░░░░░░░░░░  20% 61/302 ✓540 ✗2 ⊘11 41m10s left  …javafx.stage.SizeToSceneTest: SUCCESS
+⠹ ubuntu-26.04-kde   ██▌░░░░░░░░░░░░░░░░░  12% 37/302 ✓301 ✗0 ⊘4 52m33s left  …javafx.scene.RobotTest: SUCCESS
+  0/2 done  ✓841 ✗2 ⊘15  8m03s
 ```
 
-The total of classes and the time left are estimates, from the sources. When the output is
-not a terminal, each test class prints this as a `PROGRESS` line.
+An environment with no test for 3 minutes shows `⚠` and for how long. The bars use plain
+characters outside UTF-8, and no colors with `NO_COLOR`. The total of classes and the time
+left are estimates, from the sources. When the output is not a terminal, each test class
+prints this as a `PROGRESS` line.
 
 A summary is printed at the end, or when the run is interrupted. The exit status is 1
 when any environment fails.
@@ -267,6 +270,8 @@ when any environment fails.
 * After changing the sources, give `--source` again to copy and rebuild them.
 * On Wayland, the robot goes through the portals of the compositor, and `lib/approve.py`
   answers their permission dialogs in the nested desktop.
+* A test stuck in native code or in a deadlock fails at its JUnit timeout and the next
+  class runs: the tests run in `SEPARATE_THREAD` timeout mode.
 * Ctrl-C ends the nested sessions and the builds in the containers.
 
 Run `./jfx-tester --help` for all the options.
