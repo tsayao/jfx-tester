@@ -83,6 +83,10 @@
 #                           as test.robot.javafx.stage.* (without it, all)
 #   --skip-webkit           leave out the system tests that need the natives
 #                           of WebKit, for a build without -PCOMPILE_WEBKIT=true
+#   --test-timeout=TIME     the time after which a system test fails, such as
+#                           90s or 5m (60s; JUNIT_TEST_TIMEOUT of the build,
+#                           whose default is 120s). The tests with a timeout
+#                           of their own (@Timeout) keep it
 #   --manual=FILE           run a manual test, a .java source (with the
 #                           source launcher) or a .jar, anywhere on the host,
 #                           instead of the system tests
@@ -153,11 +157,15 @@
 #                           --build)
 #   --yes, -y               create containers and install packages without
 #                           asking
-#   --parallel              run the environments (distribution and desktop)
-#                           at the same time, once the containers are set up,
-#                           each with a workspace and a build of its own; the
-#                           output of each distribution goes to
-#                           RUN/logs/DISTRO-RELEASE/console.log
+#   --parallel[=N]          run the environments (distribution and desktop)
+#                           at the same time, up to N of them (3), once the
+#                           containers are set up, each with a workspace and a
+#                           build of its own; the output of each distribution
+#                           goes to RUN/logs/DISTRO-RELEASE/console.log
+#   --inhibit               keep the machine from sleeping or going idle
+#                           while the run lasts (systemd-inhibit): a
+#                           suspend pauses the tests until the machine
+#                           wakes up
 #   --list                  list the containers of jfx-tester and exit
 #   --help, -h              show this help and exit
 #
@@ -209,6 +217,7 @@ MANUAL=
 TESTLAB=
 ROBOT=javafx
 SKIP_WEBKIT=
+TEST_TIMEOUT=60s
 TIMEOUT=
 JVM_ARGS=
 LOG_CATEGORIES=
@@ -238,6 +247,23 @@ fail() {
     exit 1
 }
 
+# --inhibit: jfx-tester runs again, with all its arguments, under
+# systemd-inhibit, which holds the lock of sleep and idle until it ends
+if [ -z "$JT_INHIBITED" ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            --) break ;;
+            --inhibit)
+                if command -v systemd-inhibit > /dev/null; then
+                    JT_INHIBITED=1 exec systemd-inhibit --what=sleep:idle --who=jfx-tester \
+                        --why="Running the tests of JavaFX" --mode=block "$0" "$@"
+                fi
+                echo "systemd-inhibit is not installed: the machine may sleep during the run (--inhibit)" >&2
+                break ;;
+        esac
+    done
+fi
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --distros=*) DISTROS=${1#*=} ;;
@@ -249,6 +275,7 @@ while [ $# -gt 0 ]; do
         --testlab) TESTLAB=1 ;;
         --robot=*) ROBOT=${1#*=} ;;
         --skip-webkit) SKIP_WEBKIT=1 ;;
+        --test-timeout=*) TEST_TIMEOUT=${1#*=} ;;
         --timeout=*) TIMEOUT=${1#*=} ;;
         --jvm-args=*) JVM_ARGS=${1#*=} ;;
         --log-categories=*) LOG_CATEGORIES=${1#*=} ;;
@@ -266,7 +293,9 @@ while [ $# -gt 0 ]; do
         --no-sync) SYNC= ;;
         --clean) CLEAN=1; BUILD=1 ;;
         --yes|-y) YES=1 ;;
-        --parallel) PARALLEL=1 ;;
+        --parallel) PARALLEL=3 ;;
+        --parallel=*) PARALLEL=${1#*=} ;;
+        --inhibit) ;;
         --list) podman ps -a --filter name='^jfx-tester-' --format '{{.Names}}\t{{.Image}}\t{{.Status}}'; exit $? ;;
         --help|-h) usage 0 ;;
         --) shift; break ;;
@@ -275,6 +304,16 @@ while [ $# -gt 0 ]; do
     shift
 done
 GRADLE_EXTRA="$*"
+
+# A duration of JUnit: a number and a unit, seconds without one
+if ! printf '%s' "$TEST_TIMEOUT" | grep -Eqx '[0-9]+ ?(ns|μs|ms|s|m|h|d)?' || [ "${TEST_TIMEOUT%%[!0-9]*}" -eq 0 ]; then
+    echo "Bad --test-timeout: $TEST_TIMEOUT (a number and a unit, ns, ms, s, m, h or d, such as 90s)" >&2
+    exit 2
+fi
+
+case "$PARALLEL" in
+    *[!0-9]*|0) echo "Bad --parallel: $PARALLEL (a number of environments, 1 or more)" >&2; exit 2 ;;
+esac
 
 # The log of the glass of GTK
 for c in $(printf '%s' "$LOG_CATEGORIES" | tr ',' ' '); do
@@ -732,7 +771,8 @@ private_x11_sockets() {
 # The tests of an environment, a distribution and a desktop. Their results go
 # to directories of the environment (lib/session.sh)
 run_tests() {
-    set -- $GRADLE_ARGS --continue :systemTests:test
+    # The timeout before the extra Gradle arguments, whose -PJUNIT_TEST_TIMEOUT wins
+    set -- $GRADLE_ARGS "-PJUNIT_TEST_TIMEOUT=$TEST_TIMEOUT" --continue :systemTests:test
     for t in $(printf '%s' "$TESTS" | tr ',' ' '); do
         set -- "$@" --tests "$t"
     done
@@ -773,11 +813,38 @@ outcome() {
     printf '%s\t%s\n' "$2" "$3" > "$LOGS/$1/outcome"
 }
 
+# The home of an environment (JT_HOME), with the tokens of the robot and the
+# permissions of the portals, is for one run at a time: two would take each
+# other's tokens, and session.sh removes them when the kind of session
+# changes. The lock holds the pid of the run that has it, and one of a run that
+# is gone is taken over
+lock_home() {
+    home_lock=$WORK/home/$CONTAINER-$desktop.lock
+    (set -C; echo $$ > "$home_lock") 2>/dev/null && return 0
+    lock_owner=$(cat "$home_lock" 2>/dev/null)
+    if [ -n "$lock_owner" ] && [ "$lock_owner" != $$ ] && kill -0 "$lock_owner" 2>/dev/null \
+            && tr '\0' ' ' < "/proc/$lock_owner/cmdline" 2>/dev/null | grep -q jfx-tester; then
+        LOCK_ERROR="another run of jfx-tester (pid $lock_owner) uses $CONTAINER-$desktop"
+        return 1
+    fi
+    echo $$ > "$home_lock"
+}
+
+unlock_home() {
+    rm -f "$WORK/home/$CONTAINER-$desktop.lock"
+}
+
 run_environment() {
     env=$(env_name "$desktop")
     mkdir -p "$LOGS/$env" "$WORK/home/$CONTAINER-$desktop"
-    echo "== $env: running, logs in $LOGS/$env"
     BAR=$env
+    if ! lock_home; then
+        echo "== $env: $LOCK_ERROR" >&2
+        outcome "$env" SKIP "$LOCK_ERROR"
+        stage "SKIP: $LOCK_ERROR"
+        return
+    fi
+    echo "== $env: running, logs in $LOGS/$env"
     stage "starting the session"
     if [ -n "$MANUAL" ]; then
         run_manual
@@ -798,6 +865,7 @@ run_environment() {
         fi
     fi
     rm -rf "${LOGS:?}/${env:?}/config"
+    unlock_home
     echo "== $env: $(cut -f1 "$LOGS/$env/outcome")"
     [ -d "$LOGS/$env/junit" ] || stage "$(cut -f1 "$LOGS/$env/outcome"): no tests ran, see $LOGS/$env"
 }
@@ -871,12 +939,16 @@ run_distribution() {
             (WORKSPACE=$WORK/workspace/$CONTAINER_ID-$desktop
              BUILD_LOG=$LOGS/$(env_name "$desktop")/build.log
              BAR=$(env_name "$desktop")
-             [ -n "$BUILD" ] && rm -f "$BUILD_LOG"
-             if prepare; then
-                 run_environment
-             else
-                 outcome "$(env_name "$desktop")" BUILD "$PREPARE_ERROR"
-             fi) &
+             stage "waiting for a slot ($PARALLEL at a time)"
+             read -r slot <&5
+             (exec 5<&-
+              [ -n "$BUILD" ] && rm -f "$BUILD_LOG"
+              if prepare; then
+                  run_environment
+              else
+                  outcome "$(env_name "$desktop")" BUILD "$PREPARE_ERROR"
+              fi)
+             echo "$slot" >&5) &
             jobs="$jobs $!"
         else
             run_environment
@@ -1092,7 +1164,7 @@ start_bars() {
                 total[e] = n[2] + 0; done[e] = n[1] + 0
                 passed[e] = n[4] + 0; failed[e] = n[6] + 0; skipped[e] = n[8] + 0
                 left[e] = n[10] " left"
-                if (total[e] <= done[e]) left[e] = ""
+                if (total[e] <= done[e] || n[10] == "0m00s") left[e] = ""
                 sub(/^.* left  /, "", text)
             }
             what[e] = text
@@ -1165,7 +1237,18 @@ for target in $TARGETS; do
     fi
 done
 
-# Then the distributions, one after the other or at the same time
+# Then the distributions, one after the other or at the same time. At the same
+# time, each environment takes a slot from a pipe of PARALLEL slots while it
+# runs, and gives it back when it ends
+if [ -n "$PARALLEL" ]; then
+    mkfifo "$RUN/slots.fifo" && exec 5<> "$RUN/slots.fifo" || fail "Cannot create $RUN/slots.fifo"
+    rm -f "$RUN/slots.fifo"
+    i=0
+    while [ $i -lt "$PARALLEL" ]; do
+        echo slot >&5
+        i=$((i + 1))
+    done
+fi
 start_bars
 for ready in $READY; do
     DISTRO=${ready%%:*}

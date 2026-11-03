@@ -78,7 +78,8 @@ distribution of the host is used; without `--desktops`, GNOME.
 # Several distributions and desktops, one after the other
 ./jfx-tester --distros=fedora:44,ubuntu:24.04 --desktops=gnome,kde --headless
 
-# The same at the same time, with one workspace and build per environment
+# The same at the same time, with one workspace and build per environment,
+# up to 3 environments at a time (--parallel=N for another number)
 ./jfx-tester --source=$HOME/jfx --distros=fedora:44,ubuntu:24.04 --desktops=gnome,kde --headless --parallel
 
 # Linux Mint with Cinnamon, creating the container without asking
@@ -265,13 +266,20 @@ when any environment fails.
 
 * All the system tests take about an hour per environment, plus the first build of
   each workspace. Use `--tests` to run fewer.
+* A suspend of the machine pauses the tests until it wakes up. For a long run, `--inhibit`
+  keeps it from sleeping or going idle while the run lasts (`systemd-inhibit`).
 * Use `--headless` with `--parallel`, or each compositor opens a window. It also means
   that the focus on your desktop does not matter.
 * After changing the sources, give `--source` again to copy and rebuild them.
 * On Wayland, the robot goes through the portals of the compositor, and `lib/approve.py`
-  answers their permission dialogs in the nested desktop.
+  answers their permission dialogs in the nested desktop. The robot keeps the tokens of
+  the portals in a home of each distribution and desktop, `~/.cache/jfx-tester/home`, also
+  for the manual tests, so one run at a time uses an environment: another run that asks
+  for it at the same time skips it.
 * A test stuck in native code or in a deadlock fails at its JUnit timeout and the next
-  class runs: the tests run in `SEPARATE_THREAD` timeout mode.
+  class runs: the tests run in `SEPARATE_THREAD` timeout mode. The timeout is 60 s per
+  test, or that of `--test-timeout` (`--test-timeout=5m`); the tests with a `@Timeout` of
+  their own keep it.
 * Ctrl-C ends the nested sessions and the builds in the containers.
 
 Run `./jfx-tester --help` for all the options.

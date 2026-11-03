@@ -161,9 +161,27 @@ def name(node):
         return ""
 
 
-def accept_buttons(nodes):
-    return [n for n in nodes if n.get_role() == Atspi.Role.PUSH_BUTTON and has(n, Atspi.StateType.SHOWING)
-            and name(n).lower().rstrip(".") in ACCEPT]
+def label(node):
+    """The name of a node as a button shows it: without the underscores of the
+    mnemonics, in lower case. GTK 4 before 4.10 names a button by its mnemonic
+    and its label, as '_Share Share': a name of the same word twice is that word"""
+    words = name(node).replace("_", "").lower().rstrip(".").split()
+    if len(set(words)) == 1:
+        return words[0]
+    return " ".join(words)
+
+
+def shows(window):
+    """Whether a node of the window is on the screen. The dialogs of GTK 4 on a
+    headless GNOME Shell have the state showing on the window only: there, all
+    the nodes are taken as showing"""
+    reported = any(has(n, Atspi.StateType.SHOWING) for n in walk(window) if n is not window)
+    return lambda node: has(node, Atspi.StateType.SHOWING) or not reported
+
+
+def accept_buttons(nodes, shown):
+    return [n for n in nodes if n.get_role() == Atspi.Role.PUSH_BUTTON and shown(n)
+            and label(n) in ACCEPT]
 
 
 def select_kde_screen(nodes, title, keyboard):
@@ -184,20 +202,20 @@ def select_kde_screen(nodes, title, keyboard):
             return
 
 
-def prepare(window, title, kde):
+def prepare(window, title, kde, shown):
     """Turns on the switches and check boxes of a dialog, and selects the first
     item of its lists, once. A switch of GTK 4 shows twice in the tree, as
     the row, without actions, and the switch. Of KDE, only what allows something:
     the others ask for what to share"""
     nodes = list(walk(window))
     for n in nodes:
-        if n.get_role() in CHECKABLE and actionable(n) and has(n, Atspi.StateType.SHOWING) \
+        if n.get_role() in CHECKABLE and actionable(n) and shown(n) \
                 and has(n, Atspi.StateType.SENSITIVE) and not has(n, Atspi.StateType.CHECKED) \
                 and (name(n).lower().startswith("allow") if kde else True):
             log("turning on", repr(name(n)), "in", repr(title))
             act(n)
     for n in nodes:
-        if n.get_role() in LISTS and has(n, Atspi.StateType.SHOWING):
+        if n.get_role() in LISTS and shown(n):
             items = [c for c in walk(n) if c.get_role() in ITEMS]
             if items and not any(has(i, Atspi.StateType.SELECTED) for i in items):
                 log("selecting", repr(name(items[0])), "in", repr(title))
@@ -225,13 +243,14 @@ def main():
                     title = name(window)
                     key = (app.get_process_id(), getattr(window, "path", None) or title)
                     nodes = list(walk(window))
-                    buttons = accept_buttons(nodes)
+                    shown = shows(window)
+                    buttons = accept_buttons(nodes, shown)
                     if not buttons:
                         continue
                     seen.add(key)
                     state = dialogs.get(key)
                     if state is None:
-                        prepare(window, title, "kde" in name(app).lower())
+                        prepare(window, title, "kde" in name(app).lower(), shown)
                         dialogs[key] = "prepared"
                     elif state in ("prepared", "selected"):
                         sensitive = [b for b in buttons if has(b, Atspi.StateType.SENSITIVE)]
@@ -253,7 +272,7 @@ def main():
                             elif time.time() - key_sent[key] > KEY_WAIT:
                                 log("cannot select a screen, canceling", repr(title))
                                 for n in nodes:
-                                    if n.get_role() == Atspi.Role.PUSH_BUTTON and name(n).lower() == "cancel":
+                                    if n.get_role() == Atspi.Role.PUSH_BUTTON and label(n) == "cancel":
                                         act(n)
                                 dialogs[key] = "accepted"
                         elif state == "prepared":
@@ -262,8 +281,7 @@ def main():
                             # first one is clicked only then
                             dialogs[key] = "selected"
                             for n in nodes:
-                                if n.get_role() == Atspi.Role.TOGGLE_BUTTON and actionable(n) \
-                                        and has(n, Atspi.StateType.SHOWING):
+                                if n.get_role() == Atspi.Role.TOGGLE_BUTTON and actionable(n) and shown(n):
                                     log("selecting", repr(name(n)), "in", repr(title))
                                     act(n)
                                     break

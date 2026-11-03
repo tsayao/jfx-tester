@@ -81,9 +81,9 @@ done
 # The services that the bus activates, such as the portals, which the
 # compositor may start before the tests, run in English, for the names of
 # their buttons (approve.py), and Qt makes its accessibility available
-# without a screen reader
+# without a screen reader (QT_ACCESSIBILITY for Qt 5, as the portal of Plasma 5)
 dbus-update-activation-environment XDG_DATA_HOME XDG_CONFIG_HOME GSETTINGS_BACKEND \
-    LANGUAGE=C LC_ALL=C.UTF-8 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 > /dev/null 2>&1
+    LANGUAGE=C LC_ALL=C.UTF-8 QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 QT_ACCESSIBILITY=1 > /dev/null 2>&1
 
 # Everything that runs on the private bus but this shell and the one given:
 # the compositor, Gradle, the test JVMs and the services the bus activated
@@ -140,7 +140,8 @@ release_displays() {
 cleanup() {
     release_displays
     kill $CHILDREN 2>/dev/null
-    rm -f "$RUNTIME_DIR/$SOCKET" "$RUNTIME_DIR/$SOCKET.lock" "$RUNTIME_DIR/jfx-tester-vnc-$$"
+    rm -f "$RUNTIME_DIR/$SOCKET" "$RUNTIME_DIR/$SOCKET.lock" "$RUNTIME_DIR/jfx-tester-vnc-$$" \
+        "$RUNTIME_DIR/at-spi/bus_$ATSPI_DISPLAY"
     kill_session
     kill -KILL $CHILDREN 2>/dev/null
 }
@@ -583,6 +584,28 @@ EOF
     [ -n "$XRANDR_ARGS" ] && configure_xrandr
 }
 
+# The bus of AT-SPI of the session, before anything activates it. Its launcher
+# names its socket in XDG_RUNTIME_DIR, which the host and all the containers
+# share, after the X display, which the sessions of GNOME inherit from the host
+# (bus_0): the socket of the last session to start would take the place of
+# the others, whose clients would then join its bus, or none. With a display of
+# its own, which it only takes the name from, each session has a socket of its own
+ATSPI_DISPLAY=jfx-tester-$$
+start_atspi_bus() {
+    for l in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+        if [ -x "$l" ]; then
+            (DISPLAY=:$ATSPI_DISPLAY exec "$l" --launch-immediately) > "$JT_LOGS/atspi-bus.log" 2>&1 &
+            CHILDREN="$CHILDREN $!"
+            break
+        fi
+    done
+    for i in $(seq 1 50); do
+        gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+            --method org.freedesktop.DBus.NameHasOwner org.a11y.Bus 2>/dev/null | grep -q true && break
+        sleep 0.1
+    done
+}
+
 # The bus of AT-SPI activates its registry through systemd, which the private
 # session does not have
 start_atspi() {
@@ -805,6 +828,7 @@ EOF
 }
 
 SESSION_TYPE=wayland
+start_atspi_bus
 reserve_displays
 start_$JT_DESKTOP
 release_displays
@@ -823,10 +847,31 @@ if [ "$SESSION_TYPE" = wayland ]; then
     # capture of the root window, and XTest does not move the pointer of the
     # compositor
     export WAYLAND_DISPLAY=$SOCKET XDG_SESSION_TYPE=wayland
+    # The robot of JavaFX takes the remote desktop portal on GNOME 47 and later
+    # only: elsewhere the screencast portal, for the captures alone, and XTest
+    # for the mouse and the keyboard. On KDE, the remote desktop portal, whose
+    # permission is granted below, unless the options of the JVM choose
+    if [ "$JT_DESKTOP" = kde ]; then
+        case "$JT_JVM_ARGS" in
+            *-Djavafx.robot.screenshotMethod=*) ;;
+            *) JT_JVM_ARGS="$JT_JVM_ARGS -Djavafx.robot.screenshotMethod=dbusRemoteDesktop"
+               export JT_JVM_ARGS ;;
+        esac
+    fi
 fi
 dbus-update-activation-environment DISPLAY XAUTHORITY WAYLAND_DISPLAY XDG_CURRENT_DESKTOP \
     > /dev/null 2>&1
 start_atspi
+
+# The portals, before the tests. xdg-desktop-portal before 1.16 starts the
+# secret service as it starts, which does not answer in the container: it
+# answers the bus only after that times out, after 25 s, when the robot of the
+# first test has given up on it for good, and captures nothing but black
+if [ "$SESSION_TYPE" = wayland ]; then
+    gdbus call --session --timeout 90 --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.StartServiceByName org.freedesktop.portal.Desktop 0 > /dev/null 2>&1 \
+        || echo "The portals did not start: the tests of the robot will fail" >&2
+fi
 
 # Nobody is there to grant the permissions that the robot asks the portals for
 # in dialogs: the dialogs of the permissions that the portals keep do not show,
@@ -841,10 +886,11 @@ if [ "$SESSION_TYPE" = wayland ]; then
     grant_permission screenshot screenshot
     grant_permission kde-authorized remote-desktop
     # It ends when the bus of AT-SPI is not there yet, which takes longer with other
-    # sessions starting at the same time. Without it, the tests of the robot time out
-    (for i in $(seq 1 30); do
+    # sessions starting at the same time, and starts again until the session ends.
+    # Without it, the tests of the robot wait for the dialogs forever
+    (while :; do
          python3 -u "$(dirname "$0")/approve.py" && break
-         sleep 1
+         sleep 2
      done) > "$JT_LOGS/approve.log" 2>&1 &
     CHILDREN="$CHILDREN $!"
 fi
@@ -1016,8 +1062,11 @@ if [ -n "$JT_MANUAL" ]; then
         printf -- '--upgrade-module-path="%s"\n--add-modules=%s\n--enable-native-access=%s\n' \
             "$JT_SDK/lib" "$modules" "$access" > "$args"
     fi
-    # Ended after JT_TIMEOUT, which is no failure of the test
-    set -- "$JAVA_HOME/bin/java" @"$args" $JT_JVM_ARGS "$@"
+    # Ended after JT_TIMEOUT, which is no failure of the test. Its user.home is
+    # JT_HOME, as for the system tests: the robot keeps its tokens there, for
+    # the portals of this distribution and desktop, and not in the home of the
+    # host, which all of them would share. JT_JVM_ARGS can give another
+    set -- "$JAVA_HOME/bin/java" @"$args" -Duser.home="$JT_HOME" $JT_JVM_ARGS "$@"
     [ -n "$JT_TIMEOUT" ] && set -- timeout "$JT_TIMEOUT" "$@"
     { "$@"; status=$?
       if [ -n "$JT_TIMEOUT" ] && [ "$status" = 124 ]; then
