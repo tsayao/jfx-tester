@@ -43,6 +43,9 @@
 #   JT_SDK         the JavaFX SDK to run it with, instead of the one of the
 #                  workspace
 #   JT_JVM_ARGS    options of the JVMs of the tests
+#   JT_MUTTER_DEBUG  debug topics of Mutter (MUTTER_DEBUG) for GNOME Shell
+#   JT_COMPOSITOR_ENV  VAR=VALUE ..., the variables of the environment of the
+#                  nested GNOME Shell or KWin
 #
 # Exits with the status of Gradle, or of the manual test.
 
@@ -277,7 +280,19 @@ EOF
     sleep 1
 }
 
+# The variables of --compositor-env, for the compositor and what it starts
+compositor_env() {
+    for v in $JT_COMPOSITOR_ENV; do
+        export "$v"
+    done
+}
+
 start_gnome() {
+    # The debug topics of Mutter, which it logs to shell.log
+    if [ -n "$JT_MUTTER_DEBUG" ]; then
+        export MUTTER_DEBUG="$JT_MUTTER_DEBUG"
+    fi
+    compositor_env
     # GNOME Shell before 49 starts the services of X11 through systemd when the
     # process is in a unit, as it is on the host, and gives up on X11 without
     # them: on this bus, nothing answers but this
@@ -386,6 +401,10 @@ EOF
         sleep 0.2
     done
     shell_eval "Main.overview.hide()" > /dev/null
+    # A keyboard and a pointer on the seat, which has none, before Xwayland starts:
+    # without them, the first key of the robot of each test is lost
+    (exec python3 -u "$(dirname "$0")/seat-devices.py") > "$JT_LOGS/seat-devices.log" 2>&1 &
+    CHILDREN="$CHILDREN $!"
     [ -n "$configure" ] && configure_gnome_monitors
     sleep 1
 
@@ -481,6 +500,7 @@ wait_for_plasma() {
 
 # The whole Plasma desktop, on a nested KWin, or on a nested X server
 start_kde() {
+    compositor_env
     # KWin activates the portals as it starts: with the desktop unknown, they
     # pick the backend of GNOME where both are installed, which then refuses
     # the sessions of the remote desktop
@@ -954,6 +974,7 @@ allprojects {
             }
         }
 
+        def testTask = it
         def systemTests = project.path == ':systemTests'
         def classes = [] as Set
         def shown = 0L
@@ -976,7 +997,15 @@ allprojects {
             def includePrefixes = filter.includePatterns + filter.commandLineIncludePatterns
             def excludes = filter.excludePatterns.collect { regex(it) }
             def root = project.file('src/test/java')
-            project.fileTree(root) { include '**/*.java' }.each { File f ->
+            // The patterns of the task too, which take the paths of the classes, as the
+            // exclude of the monocle tests of JDK-8196607
+            def toJava = { String p -> p.replaceAll(/\.class$/, '.java') }
+            def taskIncludes = testTask.includes.collect(toJava)
+            def taskExcludes = testTask.excludes.collect(toJava)
+            project.fileTree(root) {
+                include(taskIncludes ?: ['**/*.java'])
+                exclude taskExcludes
+            }.matching { include '**/*.java' }.each { File f ->
                 def name = root.toPath().relativize(f.toPath()).toString().replace('.java', '').replace('/', '.')
                 if (excludes.any { name ==~ it } || !(f.text =~ /@(Test|ParameterizedTest|RepeatedTest)\b/)) {
                     return

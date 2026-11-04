@@ -64,14 +64,16 @@
 #                           22.3 by default) (the host, or fedora:44)
 #   --desktops=D,...        nested desktops to run the tests in: gnome, kde
 #                           (the whole Plasma desktop) or cinnamon (gnome)
-#   --session=S             the kind of session: wayland, on a nested
+#   --sessions=S,...        the kinds of session to run each desktop in
+#                           (--session=S too): wayland, on a nested
 #                           compositor, where the tests run on Xwayland, xorg,
 #                           on Xorg, shown through VNC in a window, or x11, on
 #                           a nested X server, which in a window with one
 #                           monitor is Xephyr and otherwise Xorg (wayland, and
 #                           x11 for Cinnamon, which has no wayland here). GNOME
-#                           has X11 before 49; the environments of an X11 GNOME
-#                           or KDE are named DISTRO-RELEASE-DESKTOP-x11
+#                           has X11 before 49. The environments of a session
+#                           that is not the default of the desktop are named
+#                           DISTRO-RELEASE-DESKTOP-x11 or -xorg
 #   --xwayland-scale=M      how KWin scales the X11 windows, such as the ones
 #                           of JavaFX, with its Xwayland: apps, which scale
 #                           themselves to the largest scale of the monitors
@@ -113,6 +115,14 @@
 #                           lifecycle, state, focus, position or size. The
 #                           log is in the natives of -PCONF=DebugNative, which
 #                           the build then gets, unless a -PCONF is given
+#   --mutter-debug=TOPICS   debug topics of Mutter (MUTTER_DEBUG), separated
+#                           by commas, such as input,remote-desktop: GNOME
+#                           Shell logs them to RUN/logs/ENV/shell.log
+#   --compositor-env=VAR=VALUE
+#                           a variable of the environment of the nested
+#                           GNOME Shell or KWin, such as WAYLAND_DEBUG=server,
+#                           whose output goes to its log; it can be given
+#                           more than once, and the value has no spaces
 #   --source=DIR            OpenJFX sources, which are copied to the workspaces
 #                           and built (it implies --build); without them, the
 #                           workspaces are used as they are
@@ -157,11 +167,11 @@
 #                           --build)
 #   --yes, -y               create containers and install packages without
 #                           asking
-#   --parallel[=N]          run the environments (distribution and desktop)
-#                           at the same time, up to N of them (3), once the
-#                           containers are set up, each with a workspace and a
-#                           build of its own; the output of each distribution
-#                           goes to RUN/logs/DISTRO-RELEASE/console.log
+#   --parallel[=N]          run the environments (distribution, desktop and
+#                           session) at the same time, up to N of them (3),
+#                           once the containers are set up, each with a
+#                           workspace and a build of its own; the output of
+#                           each distribution goes to RUN/logs/DISTRO-RELEASE/console.log
 #   --inhibit               keep the machine from sleeping or going idle
 #                           while the run lasts (systemd-inhibit): a
 #                           suspend pauses the tests until the machine
@@ -172,8 +182,8 @@
 # The extra Gradle arguments go to the build and to the tests, such as
 # -PUNSTABLE_TEST=true or -PCONF=Debug. Each run gets a folder of its own,
 # RUN, which is RESULTS/YYYY-MM-DD_HH-MM-SS, and the results of the runs before
-# it stay. Each environment, a distribution and a desktop, such as
-# fedora-44-gnome, gets:
+# it stay. Each environment, a distribution, a desktop and a session, such as
+# fedora-44-gnome or fedora-44-gnome-xorg, gets:
 #
 #   RUN/logs/ENV/            the logs of Gradle, of the compositor and of
 #                            approve.py, tests/CLASS.log with the output and
@@ -210,7 +220,7 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 
 DISTROS=
 DESKTOPS=gnome
-SESSION=
+SESSIONS=
 XWAYLAND_SCALE=apps
 TESTS=
 MANUAL=
@@ -221,6 +231,8 @@ TEST_TIMEOUT=60s
 TIMEOUT=
 JVM_ARGS=
 LOG_CATEGORIES=
+MUTTER_DEBUG_TOPICS=
+COMPOSITOR_ENV=
 SOURCE=
 SDK=
 JDK=
@@ -268,7 +280,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --distros=*) DISTROS=${1#*=} ;;
         --desktops=*) DESKTOPS=${1#*=} ;;
-        --session=*) SESSION=${1#*=} ;;
+        --sessions=*|--session=*) SESSIONS=${1#*=} ;;
         --xwayland-scale=*) XWAYLAND_SCALE=${1#*=} ;;
         --tests=*) TESTS=${1#*=} ;;
         --manual=*) MANUAL=${1#*=} ;;
@@ -279,6 +291,8 @@ while [ $# -gt 0 ]; do
         --timeout=*) TIMEOUT=${1#*=} ;;
         --jvm-args=*) JVM_ARGS=${1#*=} ;;
         --log-categories=*) LOG_CATEGORIES=${1#*=} ;;
+        --mutter-debug=*) MUTTER_DEBUG_TOPICS=${1#*=} ;;
+        --compositor-env=*=*) COMPOSITOR_ENV="$COMPOSITOR_ENV ${1#*=}" ;;
         --source=*) SOURCE=${1#*=} ;;
         --sdk=*) SDK=${1#*=} ;;
         --jdk=*) JDK=${1#*=} ;;
@@ -404,12 +418,12 @@ for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
         *) echo "Unknown desktop: $desktop (gnome, kde or cinnamon)" >&2; exit 2 ;;
     esac
 done
-case "$SESSION" in
-    ''|wayland|x11|xorg) ;;
-    *) echo "Unknown session: $SESSION (wayland, xorg or x11)" >&2; exit 2 ;;
-esac
-XORG=
-[ "$SESSION" = xorg ] && XORG=1
+for session in $(printf '%s' "$SESSIONS" | tr ',' ' '); do
+    case "$session" in
+        wayland|x11|xorg) ;;
+        *) echo "Unknown session: $session (wayland, xorg or x11)" >&2; exit 2 ;;
+    esac
+done
 case "$XWAYLAND_SCALE" in
     apps|system) ;;
     *) echo "Unknown scaling of Xwayland: $XWAYLAND_SCALE (apps or system)" >&2; exit 2 ;;
@@ -524,7 +538,8 @@ ensure_repositories() {
 
 ensure_packages() {
     packages="$(packages_build "$DISTRO") $(packages_runtime "$DISTRO")"
-    for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
+    for unit in $UNITS; do
+        set_unit "$unit"
         [ -n "$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")" ] && continue
         packages="$packages $(packages_desktop "$DISTRO" "$desktop")"
         packages="$packages $(packages_session "$DISTRO" "$desktop" "$SESSION")"
@@ -781,7 +796,7 @@ run_tests() {
         JT_XWAYLAND_SCALE="$XWAYLAND_SCALE" \
         JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_REPORT="$REPORTS/$env" \
         JT_ENV="$env" JT_MONITORS="$MONITORS" JT_HEADLESS="$HEADLESS" \
-        JT_HOME="$WORK/home/$CONTAINER-$desktop" JT_OWNER=$$ JT_JVM_ARGS="$JVM_ARGS" JT_SKIP_WEBKIT="$SKIP_WEBKIT" \
+        JT_HOME="$WORK/home/$HOME_ID" JT_OWNER=$$ JT_JVM_ARGS="$JVM_ARGS" JT_MUTTER_DEBUG="$MUTTER_DEBUG_TOPICS" JT_COMPOSITOR_ENV="$COMPOSITOR_ENV" JT_SKIP_WEBKIT="$SKIP_WEBKIT" \
         dbus-run-session -- sh "$(container_path "$ROOT/lib/session.sh")" "$@" $GRADLE_EXTRA
 }
 
@@ -791,19 +806,49 @@ run_manual() {
         JT_DESKTOP="$desktop" JT_SESSION="$(session_type "$desktop" "$SESSION")" JT_XORG="$XORG" \
         JT_XWAYLAND_SCALE="$XWAYLAND_SCALE" \
         JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_MONITORS="$MONITORS" \
-        JT_HOME="$WORK/home/$CONTAINER-$desktop" JT_OWNER=$$ JT_HEADLESS="$HEADLESS" \
-        JT_MANUAL="$(container_path "$MANUAL")" JT_TIMEOUT="$TIMEOUT" JT_SDK="${SDK:+$(container_path "$SDK")}" JT_JVM_ARGS="$JVM_ARGS" \
+        JT_HOME="$WORK/home/$HOME_ID" JT_OWNER=$$ JT_HEADLESS="$HEADLESS" \
+        JT_MANUAL="$(container_path "$MANUAL")" JT_TIMEOUT="$TIMEOUT" JT_SDK="${SDK:+$(container_path "$SDK")}" JT_JVM_ARGS="$JVM_ARGS" JT_MUTTER_DEBUG="$MUTTER_DEBUG_TOPICS" JT_COMPOSITOR_ENV="$COMPOSITOR_ENV" \
         dbus-run-session -- sh "$(container_path "$ROOT/lib/session.sh")" $GRADLE_EXTRA
 }
 
-# The name of the environment of a desktop of the distribution: GNOME and KDE
-# on X11 get -x11, as Wayland is their default
+# The environments of a distribution, as DESKTOP/SESSION, of each desktop in
+# each session asked for (an empty session is the default of the desktop),
+# once each, as Cinnamon takes x11 for its default
+UNITS=
+for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
+    for session in $(printf '%s' "${SESSIONS:-default}" | tr ',' ' '); do
+        [ "$session" = default ] && session=
+        [ "$(session_type "$desktop" "$session")" = "$(session_type "$desktop" "")" ] \
+            && [ "$session" != xorg ] && session=
+        case " $UNITS " in
+            *" $desktop/$session "*) ;;
+            *) UNITS="$UNITS $desktop/$session" ;;
+        esac
+    done
+done
+
+# Sets desktop, SESSION and XORG of an environment of UNITS, and HOME_ID, the
+# name of its home in WORK/home
+set_unit() {
+    desktop=${1%%/*}
+    SESSION=${1#*/}
+    XORG=
+    [ "$SESSION" = xorg ] && XORG=1
+    HOME_ID=jfx-tester-$(env_base)
+}
+
+# The name of the environment of the desktop and the session of set_unit, without
+# -manual: a session that is not the default of the desktop gets -x11 or -xorg
+env_base() {
+    name=$CONTAINER_ID-$desktop
+    if [ -n "$SESSION" ]; then
+        name=$name-$SESSION
+    fi
+    echo "$name"
+}
+
 env_name() {
-    name=$CONTAINER_ID-$1
-    case "$1:$(session_type "$1" "$SESSION")" in
-        gnome:x11|kde:x11) name=$name-x11 ;;
-    esac
-    echo "$name$SUFFIX"
+    echo "$(env_base)$SUFFIX"
 }
 
 # The outcome of an environment, for the summary: OK, FAIL, SKIP, SETUP or
@@ -819,24 +864,24 @@ outcome() {
 # changes. The lock holds the pid of the run that has it, and one of a run that
 # is gone is taken over
 lock_home() {
-    home_lock=$WORK/home/$CONTAINER-$desktop.lock
+    home_lock=$WORK/home/$HOME_ID.lock
     (set -C; echo $$ > "$home_lock") 2>/dev/null && return 0
     lock_owner=$(cat "$home_lock" 2>/dev/null)
     if [ -n "$lock_owner" ] && [ "$lock_owner" != $$ ] && kill -0 "$lock_owner" 2>/dev/null \
             && tr '\0' ' ' < "/proc/$lock_owner/cmdline" 2>/dev/null | grep -q jfx-tester; then
-        LOCK_ERROR="another run of jfx-tester (pid $lock_owner) uses $CONTAINER-$desktop"
+        LOCK_ERROR="another run of jfx-tester (pid $lock_owner) uses $HOME_ID"
         return 1
     fi
     echo $$ > "$home_lock"
 }
 
 unlock_home() {
-    rm -f "$WORK/home/$CONTAINER-$desktop.lock"
+    rm -f "$WORK/home/$HOME_ID.lock"
 }
 
 run_environment() {
-    env=$(env_name "$desktop")
-    mkdir -p "$LOGS/$env" "$WORK/home/$CONTAINER-$desktop"
+    env=$(env_name)
+    mkdir -p "$LOGS/$env" "$WORK/home/$HOME_ID"
     BAR=$env
     if ! lock_home; then
         echo "== $env: $LOCK_ERROR" >&2
@@ -908,8 +953,9 @@ prepare() {
 # same time, which then fail
 run_distribution() {
     if ! private_x11_sockets; then
-        for desktop in $DESKTOP_LIST; do
-            outcome "$(env_name "$desktop")" SETUP "no directory for the X sockets in $CONTAINER"
+        for unit in $UNITS; do
+            set_unit "$unit"
+            outcome "$(env_name)" SETUP "no directory for the X sockets in $CONTAINER"
         done
         return
     fi
@@ -918,15 +964,17 @@ run_distribution() {
         BUILD_LOG=$LOGS/$CONTAINER_ID/build.log
         BAR=$CONTAINER_ID
         if ! prepare; then
-            for desktop in $DESKTOP_LIST; do
-                outcome "$(env_name "$desktop")" BUILD "$PREPARE_ERROR"
+            for unit in $UNITS; do
+                set_unit "$unit"
+                outcome "$(env_name)" BUILD "$PREPARE_ERROR"
             done
             return
         fi
         [ -n "$BARS_PID" ] && echo "PROGRESS $BAR -"
     fi
     jobs=
-    for desktop in $DESKTOP_LIST; do
+    for unit in $UNITS; do
+        set_unit "$unit"
         reason=$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")
         if [ -z "$reason" ] && [ "$desktop:$(session_type "$desktop" "$SESSION")" = gnome:x11 ] \
                 && ! in_container sh -c 'gnome-shell --help-all 2>&1 | grep -q -e "--x11 "'; then
@@ -934,11 +982,11 @@ run_distribution() {
         fi
         if [ -n "$reason" ]; then
             echo "$reason" >&2
-            outcome "$(env_name "$desktop")" SKIP "$reason"
+            outcome "$(env_name)" SKIP "$reason"
         elif [ -n "$PARALLEL" ]; then
-            (WORKSPACE=$WORK/workspace/$CONTAINER_ID-$desktop
-             BUILD_LOG=$LOGS/$(env_name "$desktop")/build.log
-             BAR=$(env_name "$desktop")
+            (WORKSPACE=$WORK/workspace/$(env_base)
+             BUILD_LOG=$LOGS/$(env_name)/build.log
+             BAR=$(env_name)
              stage "waiting for a slot ($PARALLEL at a time)"
              read -r slot <&5
              (exec 5<&-
@@ -946,7 +994,7 @@ run_distribution() {
               if prepare; then
                   run_environment
               else
-                  outcome "$(env_name "$desktop")" BUILD "$PREPARE_ERROR"
+                  outcome "$(env_name)" BUILD "$PREPARE_ERROR"
               fi)
              echo "$slot" >&5) &
             jobs="$jobs $!"
@@ -1211,7 +1259,6 @@ LOGS=$RUN/logs
 REPORTS=$RUN/reports
 mkdir -p "$LOGS" "$REPORTS"
 echo "== Results in $RUN"
-DESKTOP_LIST=$(printf '%s' "$DESKTOPS" | tr ',' ' ')
 SUFFIX=
 [ -n "$MANUAL" ] && SUFFIX=-manual
 ENVIRONMENTS=
@@ -1224,15 +1271,17 @@ for target in $TARGETS; do
     RELEASE=${target#*:}
     CONTAINER_ID=$DISTRO-$RELEASE
     CONTAINER=jfx-tester-$CONTAINER_ID
-    for desktop in $DESKTOP_LIST; do
-        ENVIRONMENTS="$ENVIRONMENTS $(env_name "$desktop")"
+    for unit in $UNITS; do
+        set_unit "$unit"
+        ENVIRONMENTS="$ENVIRONMENTS $(env_name)"
     done
     echo "== $DISTRO $RELEASE ($CONTAINER)"
     if ensure_container && ensure_repositories && ensure_packages && ensure_jdk; then
         READY="$READY $target:$JAVA_HOME_IN"
     else
-        for desktop in $DESKTOP_LIST; do
-            outcome "$(env_name "$desktop")" SETUP "the container could not be set up"
+        for unit in $UNITS; do
+            set_unit "$unit"
+            outcome "$(env_name)" SETUP "the container could not be set up"
         done
     fi
 done

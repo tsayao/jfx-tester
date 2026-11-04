@@ -125,6 +125,10 @@ close its window, or after `--timeout` seconds (30 by default with `--headless`)
 # KDE on X11
 ./jfx-tester --distros=fedora:44 --desktops=kde --session=x11 --manual=Hello.java
 
+# GNOME and KDE, each on Wayland and on Xorg: four environments, such as
+# ubuntu-24.04-gnome and ubuntu-24.04-gnome-xorg
+./jfx-tester --distros=ubuntu:24.04 --desktops=gnome,kde --sessions=wayland,xorg --headless
+
 # One monitor of a given size and scale
 ./jfx-tester --headless --size=1080p --scale=1.5 --manual=Hello.java
 
@@ -213,9 +217,14 @@ manual/JDK8354943Test.sh --sdk=DIR --headless JDK-8353556 JDK-8316425
 Toolbox has no Mint image: `mint:X.Y` is the Ubuntu it is based on, plus the
 repository of Mint. KDE on X11 is not available from Plasma 6.8 on.
 
-`--session` chooses the kind of session. A desktop without that kind shows as `SKIP`.
+`--sessions` chooses the kinds of session, separated by commas (`--session` is the
+same). Each desktop runs in each of them, as an environment of its own: the default
+session of the desktop keeps the plain name, such as `fedora-44-gnome`, and the others
+get `-x11` or `-xorg`, such as `fedora-44-gnome-xorg`. A desktop without that kind
+shows as `SKIP`. With `--parallel`, each of these environments has a workspace of its
+own, which `--source` builds.
 
-| `--session` | The tests run on                                     | Desktops                       |
+| `--sessions` | The tests run on                                     | Desktops                       |
 |-------------|------------------------------------------------------|--------------------------------|
 | `wayland`   | Xwayland of a nested compositor (default for GNOME and KDE) | GNOME, KDE              |
 | `xorg`      | Xorg, shown through VNC unless `--headless`          | GNOME before 49, KDE, Cinnamon |
