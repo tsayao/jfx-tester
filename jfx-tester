@@ -678,7 +678,11 @@ background() {
     wait $!
 }
 
-GRADLE_ARGS="--no-daemon --console=plain -PFULL_TEST=true -PUSE_ROBOT=true"
+# The daemon of Gradle gets the output of the tests, which can be a million
+# lines of a class, as the warnings of NodeInitializationStressTest without 3D:
+# with its 512 MB by default, it then collects garbage forever and the run
+# hangs. Extra Gradle arguments with -Dorg.gradle.jvmargs take its place
+GRADLE_ARGS="--no-daemon --console=plain -PFULL_TEST=true -PUSE_ROBOT=true -Dorg.gradle.jvmargs=-Xmx1g"
 # The configuration of the build: the one given, or DebugNative for the log
 # categories, which are compiled in its natives only. The extra arguments of a
 # manual test are its own

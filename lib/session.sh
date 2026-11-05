@@ -407,6 +407,16 @@ EOF
     CHILDREN="$CHILDREN $!"
     [ -n "$configure" ] && configure_gnome_monitors
     sleep 1
+    # Its session shows the indicator of screen sharing in the panel for as long
+    # as it lasts: the indicator forgets it, and shows for the sessions of the
+    # robots only
+    for i in $(seq 1 50); do
+        grep -q "^seat devices created" "$JT_LOGS/seat-devices.log" 2>/dev/null && break
+        grep -q "^no seat devices" "$JT_LOGS/seat-devices.log" 2>/dev/null && break
+        sleep 0.1
+    done
+    shell_eval "{ const i = Main.panel.statusArea.screenSharing;
+        if (i?._handles) { i._handles.clear(); i._sync(); i.hide(); } }" > /dev/null
 
     export XDG_CURRENT_DESKTOP=GNOME
     # The Xwayland of the shell, started when the first X client connects
@@ -1019,27 +1029,62 @@ allprojects {
             }
         }
 
+        // The log of each class stays open while it runs, as a test may print a
+        // million lines, and the daemon of Gradle, which gets them, runs out of memory
+        // when each opens the file again. It stops at LOG_LIMIT bytes
         def tests = new File(logs, 'tests')
-        def logOf = { TestDescriptor d ->
-            tests.mkdirs()
-            new File(tests, "${d.className ?: d.name}.log")
+        def LOG_LIMIT = 16L * 1024 * 1024
+        def writers = [:]
+        def sizes = [:]
+        // The lines of jfx-tester, of each test and its outcome, are written past the limit
+        def log = { TestDescriptor d, String text, boolean always = false ->
+            def name = d.className ?: d.name
+            def size = sizes.get(name, 0L)
+            if (!always) {
+                if (size < 0) {
+                    return
+                }
+                size += text.length()
+                if (size > LOG_LIMIT) {
+                    text = "\n==== jfx-tester: the log of the class stops here, at ${LOG_LIMIT >> 20} MB; the rest of its output is in the JUnit report\n"
+                    size = -1
+                }
+                sizes[name] = size
+            }
+            def w = writers[name]
+            if (w == null) {
+                tests.mkdirs()
+                w = new BufferedWriter(new FileWriter(new File(tests, "${name}.log"), true), 65536)
+                writers[name] = w
+            }
+            w.write(text)
+        }
+        def close = { String name ->
+            writers.remove(name)?.close()
         }
         addTestOutputListener(new TestOutputListener() {
             void onOutput(TestDescriptor d, TestOutputEvent event) {
-                logOf(d).append(event.message)
+                log(d, event.message)
             }
         })
         addTestListener(new TestListener() {
             void beforeSuite(TestDescriptor d) {}
             void afterSuite(TestDescriptor d, TestResult r) {
+                // The end of the tests of the task, also when they fail
+                if (d.parent == null) {
+                    writers.keySet().toList().each { close(it) }
+                }
                 // A class, and not the suites of its parameterized tests
-                if (systemTests && d.className != null && d.name == d.className) {
-                    classes << d.name
-                    progress("${d.name}: ${r.resultType}")
+                if (d.className != null && d.name == d.className) {
+                    close(d.className)
+                    if (systemTests) {
+                        classes << d.name
+                        progress("${d.name}: ${r.resultType}")
+                    }
                 }
             }
             void beforeTest(TestDescriptor d) {
-                logOf(d).append("==== ${d.name}\n")
+                log(d, "==== ${d.name}\n", true)
             }
             void afterTest(TestDescriptor d, TestResult r) {
                 switch (r.resultType) {
@@ -1058,7 +1103,7 @@ allprojects {
                     e.printStackTrace(new PrintWriter(trace))
                     text += trace.toString()
                 }
-                logOf(d).append(text)
+                log(d, text, true)
             }
         })
     }

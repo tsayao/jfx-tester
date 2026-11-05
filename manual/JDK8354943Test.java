@@ -1005,6 +1005,9 @@ public class JDK8354943Test extends Application {
             show(c, Status.RUNNING, "");
             reveal(c);
         });
+        // The problem, as the bug report gives it, before the runs of the check
+        System.out.printf("%nTEST %s / %s%n  Problem: %s%n  Seen on: %s%n  Checks:  %s%n", c.bug.id, c.name,
+                c.bug.title, c.bug.reported, c.steps);
         long start = System.nanoTime();
         int runs = 0, failures = 0;
         String firstFailure = null, result = null, skip = null;

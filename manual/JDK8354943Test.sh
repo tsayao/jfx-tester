@@ -206,7 +206,7 @@ while read -r bug repeat env; do
     echo "== $n: $bug, $env$EXTRA"
     # shellcheck disable=SC2086
     { ./jfx-tester $build $env $EXTRA --results="$LOGS" --manual=manual/JDK8354943Test.java --timeout=1800 \
-        --jvm-args="$props" < /dev/null; echo $? > "$log.status"; } 2>&1 | tee "$log" | grep --line-buffered -E '^(OK|FAIL|SKIP) +JDK|^RUN +JDK|^TESTS|^Copying|^Building'
+        --jvm-args="$props" < /dev/null; echo $? > "$log.status"; } 2>&1 | tee "$log" | grep --line-buffered -E '^(OK|FAIL|SKIP) +JDK|^(RUN|TEST) +JDK|^  (Problem|Seen on|Checks):|^TESTS|^Copying|^Building'
     status=$(cat "$log.status")
     rm -f "$log.status"
     result=$(grep -E '^TESTS' "$log" | tail -1 | sed 's/^TESTS //')
