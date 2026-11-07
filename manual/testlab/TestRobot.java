@@ -34,7 +34,8 @@ import java.awt.image.BufferedImage;
 /**
  * The robot of the labs: the Robot of JavaFX, or with -Dtests.input=libei
  * (jfx-tester --robot=libei) libei for the input and the Screenshot portal for
- * the screen. Only the position of the pointer still comes from the Robot of
+ * the screen: its PickColor for a pixel, clicked by libei, and screenshots for
+ * the regions. Only the position of the pointer still comes from the Robot of
  * JavaFX, as neither of them tells it.
  */
 final class TestRobot {
@@ -152,7 +153,15 @@ final class TestRobot {
         if (!useLibei) {
             return robot.getPixelColor(x, y);
         }
+        double[] rgb = ei().pickColor(x, y);
+        if (rgb != null) {
+            return Color.color(clamp(rgb[0]), clamp(rgb[1]), clamp(rgb[2]));
+        }
         return capture(null, x, y, 1, 1, true).getPixelReader().getColor(0, 0);
+    }
+
+    private static double clamp(double v) {
+        return Math.clamp(v, 0, 1);
     }
 
     Color getPixelColor(Point2D p) {

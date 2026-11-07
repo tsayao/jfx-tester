@@ -51,7 +51,9 @@ import java.util.function.Supplier;
  * for the answers of the portal: the JavaFX application thread only waits, and
  * the dialog of the portal does not need it. The positions are global, in the
  * logical coordinates of the compositor. The screen comes from the Screenshot
- * interface of the portal.
+ * interface of the portal: a pixel from its PickColor, as the eyedropper
+ * apps do, which waits for a click that libei gives, and a region, or a pixel
+ * when PickColor does not work, from a screenshot of all the screens.
  */
 final class EiInput {
 
@@ -73,6 +75,17 @@ final class EiInput {
     // The compositor finds the surface under the pointer at its next frame:
     // what follows a motion must go to that surface
     private static final long POINTER_FOCUS_DELAY = 40;
+    private static final int BTN_LEFT = 0x110;
+    // PickColor shows its picker a moment after the call: the click waits for
+    // it, and comes again when the picker missed it
+    private static final long PICK_FIRST_CLICK_MS = 80;
+    private static final long PICK_CLICK_EVERY_MS = 400;
+    private static final int PICK_CLICKS = 8;
+    // Why PickColor does not work, once it failed: the screenshot does then
+    private static volatile String pickFailure;
+    // The last position given, and the buttons held, which a pick must not break
+    private double lastX = Double.NaN, lastY = Double.NaN;
+    private int buttonsHeld;
 
     private static final ExecutorService THREAD = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "libei");
@@ -88,6 +101,8 @@ final class EiInput {
     private MemorySegment keyboard;
     private boolean disconnected;
     private MemorySegment pendingPing;
+    // How long a frame is given to reach the compositor without a ping to wait for
+    private static final long UNSYNCED_FRAME_MS = 30;
     private int sequence;
 
     /**
@@ -126,6 +141,8 @@ final class EiInput {
             MemorySegment device = require(() -> absolute, "absolute pointer");
             Ei.invoke(Ei.POINTER_MOTION_ABSOLUTE, device, x, y);
             frame(device);
+            lastX = x;
+            lastY = y;
             Thread.sleep(POINTER_FOCUS_DELAY);
             return null;
         });
@@ -137,6 +154,7 @@ final class EiInput {
             MemorySegment device = require(() -> buttons, "button");
             Ei.invoke(Ei.BUTTON_BUTTON, device, evdevButton, press);
             frame(device);
+            buttonsHeld = Math.max(0, buttonsHeld + (press ? 1 : -1));
             return null;
         });
     }
@@ -159,6 +177,76 @@ final class EiInput {
             frame(device);
             return null;
         });
+    }
+
+    /**
+     * The color of a pixel, in sRGB, through the PickColor of the Screenshot
+     * portal: it shows a picker, which the pointer of libei clicks at the
+     * point, and answers the color there, with no screenshot. The pointer then
+     * goes back. Null when PickColor does not work, or a button is held, which
+     * the click would release: a screenshot does then.
+     */
+    double[] pickColor(double x, double y) {
+        if (pickFailure != null) {
+            return null;
+        }
+        return call(() -> {
+            if (buttonsHeld > 0) {
+                return null;
+            }
+            double backX = lastX, backY = lastY;
+            try (Arena arena = Arena.ofConfined()) {
+                Portal.init(arena);
+                if (Portal.version(arena, Portal.SCREENSHOT) < 2) {
+                    throw new UnsupportedOperationException("The Screenshot portal has no PickColor (version 2)");
+                }
+                int[] clicks = {0};
+                MemorySegment results = Portal.request(arena, Portal.SCREENSHOT, "PickColor", "('', %s)", null,
+                        PICK_FIRST_CLICK_MS + PICK_CLICK_EVERY_MS * PICK_CLICKS, elapsed -> {
+                            dispatch();
+                            if (clicks[0] < PICK_CLICKS
+                                    && elapsed >= PICK_FIRST_CLICK_MS + PICK_CLICK_EVERY_MS * clicks[0]) {
+                                clicks[0]++;
+                                clickAt(x, y);
+                            }
+                        });
+                if (Boolean.getBoolean("tests.pickTrace")) {
+                    System.out.println("PickColor answered after " + clicks[0] + " clicks");
+                }
+                double[] rgb = Portal.doubles(arena, results, "color", 3);
+                if (rgb == null) {
+                    throw new IllegalStateException("PickColor returned no color");
+                }
+                return rgb;
+            } catch (RuntimeException e) {
+                pickFailure = e.getMessage();
+                System.out.println("PickColor does not work, the pixels come from screenshots: " + e.getMessage());
+                return null;
+            } finally {
+                if (!Double.isNaN(backX)) {
+                    MemorySegment device = absolute;
+                    if (device != null) {
+                        Ei.invoke(Ei.POINTER_MOTION_ABSOLUTE, device, backX, backY);
+                        frame(device);
+                        lastX = backX;
+                        lastY = backY;
+                    }
+                }
+            }
+        });
+    }
+
+    // On the thread of libei, inside a call
+    private void clickAt(double x, double y) throws InterruptedException {
+        MemorySegment pointer = require(() -> absolute, "absolute pointer");
+        Ei.invoke(Ei.POINTER_MOTION_ABSOLUTE, pointer, x, y);
+        frame(pointer);
+        Thread.sleep(POINTER_FOCUS_DELAY);
+        MemorySegment button = require(() -> buttons, "button");
+        Ei.invoke(Ei.BUTTON_BUTTON, button, BTN_LEFT, true);
+        frame(button);
+        Ei.invoke(Ei.BUTTON_BUTTON, button, BTN_LEFT, false);
+        frame(button);
     }
 
     /**
@@ -211,6 +299,14 @@ final class EiInput {
     // Sends the frame, and waits for the compositor to have processed it
     private void frame(MemorySegment device) throws InterruptedException {
         Ei.invoke(Ei.DEVICE_FRAME, device, (long) Ei.invoke(Ei.NOW, ei));
+        if (Ei.NEW_PING == null || Ei.PING == null || Ei.PING_UNREF == null || Ei.EVENT_PONG_GET_PING == null) {
+            // libei before 1.3, as in Ubuntu 24.04, has no ping: the frame is
+            // flushed by a dispatch, and given time to arrive
+            dispatch();
+            Thread.sleep(UNSYNCED_FRAME_MS);
+            dispatch();
+            return;
+        }
         MemorySegment ping = (MemorySegment) Ei.invoke(Ei.NEW_PING, ei);
         pendingPing = ping;
         try {
@@ -430,6 +526,11 @@ final class EiInput {
         private static final MethodHandle PARSE = handle(GLIB, "g_variant_parse", FunctionDescriptor.of(P, P, P, P, P, P));
         private static final MethodHandle CHILD = handle(GLIB, "g_variant_get_child_value", FunctionDescriptor.of(P, P, ValueLayout.JAVA_LONG));
         private static final MethodHandle GET_UINT32 = handle(GLIB, "g_variant_get_uint32", FunctionDescriptor.of(I, P));
+        private static final MethodHandle GET_BOOLEAN = handle(GLIB, "g_variant_get_boolean", FunctionDescriptor.of(I, P));
+        private static final MethodHandle GET_DOUBLE = handle(GLIB, "g_variant_get_double",
+                FunctionDescriptor.of(ValueLayout.JAVA_DOUBLE, P));
+        private static final MethodHandle N_CHILDREN = handle(GLIB, "g_variant_n_children",
+                FunctionDescriptor.of(ValueLayout.JAVA_LONG, P));
         private static final MethodHandle GET_HANDLE = handle(GLIB, "g_variant_get_handle", FunctionDescriptor.of(I, P));
         private static final MethodHandle GET_VARIANT = handle(GLIB, "g_variant_get_variant", FunctionDescriptor.of(P, P));
         private static final MethodHandle GET_STRING = handle(GLIB, "g_variant_get_string", FunctionDescriptor.of(P, P, P));
@@ -441,7 +542,9 @@ final class EiInput {
         private static final String PORTAL = "org.freedesktop.portal.Desktop";
         private static final String PORTAL_PATH = "/org/freedesktop/portal/desktop";
         private static final String REMOTE_DESKTOP = "org.freedesktop.portal.RemoteDesktop";
-        private static final String SCREENSHOT = "org.freedesktop.portal.Screenshot";
+        static final String SCREENSHOT = "org.freedesktop.portal.Screenshot";
+        private static final String MUTTER_RD = "org.gnome.Mutter.RemoteDesktop";
+        private static final String KWIN = "org.kde.KWin";
         private static final int SESSION_BUS = 2;
         private static final int RESPONSE_SUCCESS = 0;
         // A keyboard and a pointer, kept until they are revoked
@@ -457,7 +560,7 @@ final class EiInput {
         private static int responseCode;
         private static MemorySegment responseResults;
 
-        private static void init(Arena arena) {
+        static void init(Arena arena) {
             if (GIO == null || GLIB == null) {
                 throw new IllegalStateException("GIO is not installed");
             }
@@ -483,37 +586,96 @@ final class EiInput {
             }
         }
 
+        /**
+         * The connection to the EIS of the compositor: straight from Mutter or
+         * KWin, whose remote desktop D-Bus interfaces create a keyboard and a
+         * pointer for any client of the session bus, the private one of the
+         * nested desktop, without a dialog; from the portal otherwise, or with
+         * -Dtests.eisPortal=true.
+         */
         static int connectToEis() throws InterruptedException {
             try (Arena arena = Arena.ofConfined()) {
                 init(arena);
-                MemorySegment error;
-                if (portalVersion(arena) < 2) {
+                if (!Boolean.getBoolean("tests.eisPortal")) {
+                    if (hasOwner(arena, MUTTER_RD)) {
+                        return mutterEis(arena);
+                    }
+                    if (hasOwner(arena, KWIN)) {
+                        try {
+                            return kwinEis(arena);
+                        } catch (IllegalStateException e) {
+                            // KWin before 6.1 has no EIS: the portal has none either
+                        }
+                    }
+                }
+                if (version(arena, REMOTE_DESKTOP) < 2) {
                     throw new UnsupportedOperationException("The RemoteDesktop portal has no ConnectToEIS (version 2)");
                 }
                 String session = start(arena);
-                MemorySegment fds = arena.allocate(ValueLayout.ADDRESS);
-                error = error(arena);
-                MemorySegment reply = (MemorySegment) Ei.invoke(CALL_FD_SYNC, bus, arena.allocateFrom(PORTAL),
-                        arena.allocateFrom(PORTAL_PATH), arena.allocateFrom(REMOTE_DESKTOP),
-                        arena.allocateFrom("ConnectToEIS"),
-                        parse(arena, "(objectpath '" + session + "', @a{sv} {})"), MemorySegment.NULL, 0, -1,
-                        MemorySegment.NULL, fds, MemorySegment.NULL, error);
-                check(error, "ConnectToEIS");
-                int index = (int) Ei.invoke(GET_HANDLE, child(reply, 0));
-                error = error(arena);
-                int fd = (int) Ei.invoke(FD_LIST_GET, fds.get(ValueLayout.ADDRESS, 0), index, error);
-                check(error, "the file descriptor of ConnectToEIS");
-                return fd;
+                return callForFd(arena, PORTAL, PORTAL_PATH, REMOTE_DESKTOP, "ConnectToEIS",
+                        "(objectpath '" + session + "', @a{sv} {})");
             }
         }
 
-        private static int portalVersion(Arena arena) {
+        // A remote desktop session of Mutter, which lasts as long as the bus
+        // connection that created it, and takes its calls from that one only
+        private static int mutterEis(Arena arena) {
+            MemorySegment created = call(arena, MUTTER_RD, "/org/gnome/Mutter/RemoteDesktop", MUTTER_RD,
+                    "CreateSession", null);
+            String session = ((MemorySegment) Ei.invoke(GET_STRING, child(created, 0), MemorySegment.NULL))
+                    .reinterpret(Long.MAX_VALUE).getString(0);
+            call(arena, MUTTER_RD, session, MUTTER_RD + ".Session", "Start", null);
+            return callForFd(arena, MUTTER_RD, session, MUTTER_RD + ".Session", "ConnectToEIS",
+                    "({'device-types': <uint32 " + DEVICES + ">},)");
+        }
+
+        // The EIS of KWin for its portal, whose context it closes when the bus
+        // connection that asked for it goes; the cookie that comes with the
+        // descriptor only names the context to close
+        private static int kwinEis(Arena arena) {
+            return callForFd(arena, KWIN, "/org/kde/KWin/EIS/RemoteDesktop", "org.kde.KWin.EIS.RemoteDesktop",
+                    "connectToEIS", "(" + DEVICES + ",)");
+        }
+
+        private static boolean hasOwner(Arena arena, String name) {
+            MemorySegment reply = call(arena, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                    "NameHasOwner", "('" + name + "',)");
+            return (int) Ei.invoke(GET_BOOLEAN, child(reply, 0)) != 0;
+        }
+
+        private static MemorySegment call(Arena arena, String dest, String path, String iface, String method,
+                                          String args) {
+            MemorySegment error = error(arena);
+            MemorySegment reply = (MemorySegment) Ei.invoke(CALL_SYNC, bus, arena.allocateFrom(dest),
+                    arena.allocateFrom(path), arena.allocateFrom(iface), arena.allocateFrom(method),
+                    args == null ? MemorySegment.NULL : parse(arena, args), MemorySegment.NULL, 0, -1,
+                    MemorySegment.NULL, error);
+            check(error, method);
+            return reply;
+        }
+
+        // Calls a method whose first answer is a file descriptor
+        private static int callForFd(Arena arena, String dest, String path, String iface, String method, String args) {
+            MemorySegment fds = arena.allocate(ValueLayout.ADDRESS);
+            MemorySegment error = error(arena);
+            MemorySegment reply = (MemorySegment) Ei.invoke(CALL_FD_SYNC, bus, arena.allocateFrom(dest),
+                    arena.allocateFrom(path), arena.allocateFrom(iface), arena.allocateFrom(method),
+                    parse(arena, args), MemorySegment.NULL, 0, -1, MemorySegment.NULL, fds, MemorySegment.NULL, error);
+            check(error, method);
+            int index = (int) Ei.invoke(GET_HANDLE, child(reply, 0));
+            error = error(arena);
+            int fd = (int) Ei.invoke(FD_LIST_GET, fds.get(ValueLayout.ADDRESS, 0), index, error);
+            check(error, "the file descriptor of " + method);
+            return fd;
+        }
+
+        static int version(Arena arena, String iface) {
             MemorySegment error = error(arena);
             MemorySegment reply = (MemorySegment) Ei.invoke(CALL_SYNC, bus, arena.allocateFrom(PORTAL),
                     arena.allocateFrom(PORTAL_PATH), arena.allocateFrom("org.freedesktop.DBus.Properties"),
-                    arena.allocateFrom("Get"), parse(arena, "('" + REMOTE_DESKTOP + "', 'version')"),
+                    arena.allocateFrom("Get"), parse(arena, "('" + iface + "', 'version')"),
                     MemorySegment.NULL, 0, -1, MemorySegment.NULL, error);
-            check(error, "the version of the RemoteDesktop portal");
+            check(error, "the version of " + iface);
             return (int) Ei.invoke(GET_UINT32, Ei.invoke(GET_VARIANT, child(reply, 0)));
         }
 
@@ -536,9 +698,19 @@ final class EiInput {
             return session;
         }
 
+        // What a request does while it waits, after the call, with the milliseconds since
+        interface Waiting {
+            void tick(long elapsedMs) throws InterruptedException;
+        }
+
         // Calls a method that answers with a Request, and waits for its Response
         private static MemorySegment request(Arena arena, String iface, String method, String format, String options)
                 throws InterruptedException {
+            return request(arena, iface, method, format, options, RESPONSE_TIMEOUT / 1_000_000, null);
+        }
+
+        static MemorySegment request(Arena arena, String iface, String method, String format, String options,
+                                     long timeoutMs, Waiting waiting) throws InterruptedException {
             String token = "jfx_lab_" + ProcessHandle.current().pid() + "_" + ++requests;
             String sender = ((MemorySegment) Ei.invoke(UNIQUE_NAME, bus)).reinterpret(Long.MAX_VALUE).getString(0)
                     .substring(1).replace('.', '_');
@@ -563,10 +735,14 @@ final class EiInput {
                         arena.allocateFrom(iface), arena.allocateFrom(method),
                         parse(arena, format.formatted(dict)), MemorySegment.NULL, 0, -1, MemorySegment.NULL, error);
                 check(error, method);
-                long deadline = System.nanoTime() + RESPONSE_TIMEOUT;
+                long called = System.nanoTime();
+                long deadline = called + timeoutMs * 1_000_000;
                 while (!responded) {
                     Ei.invoke(CONTEXT_ITERATION, context, 0);
-                    if (System.nanoTime() > deadline) {
+                    if (waiting != null && !responded) {
+                        waiting.tick((System.nanoTime() - called) / 1_000_000);
+                    }
+                    if (!responded && System.nanoTime() > deadline) {
                         throw new UnsupportedOperationException("The portal did not answer " + method);
                     }
                     Thread.sleep(5);
@@ -591,6 +767,19 @@ final class EiInput {
 
         private static MemorySegment child(MemorySegment variant, long index) {
             return (MemorySegment) Ei.invoke(CHILD, variant, index);
+        }
+
+        // A tuple of doubles in a dictionary, such as the (ddd) of a color
+        static double[] doubles(Arena arena, MemorySegment dict, String key, int count) {
+            MemorySegment value = (MemorySegment) Ei.invoke(LOOKUP, dict, arena.allocateFrom(key), MemorySegment.NULL);
+            if (value.equals(MemorySegment.NULL) || (long) Ei.invoke(N_CHILDREN, value) < count) {
+                return null;
+            }
+            double[] result = new double[count];
+            for (int i = 0; i < count; i++) {
+                result[i] = (double) Ei.invoke(GET_DOUBLE, child(value, i));
+            }
+            return result;
         }
 
         private static String string(Arena arena, MemorySegment dict, String key) {
