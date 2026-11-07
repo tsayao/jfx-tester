@@ -168,10 +168,67 @@ close its window, or after `--timeout` seconds (30 by default with `--headless`)
 Log categories: `all`, `dialog`, `input`, `lifecycle`, `state`, `focus`, `position`
 and `size`.
 
+### Labs
+
+`manual/testlab` has a lab per area, each an application of its own with its tests, which
+show OK, FAIL or SKIP. They need JDK 22 and JavaFX 27 or later.
+
+| Name        | Lab                                                                         |
+|-------------|-----------------------------------------------------------------------------|
+| `robot`     | `javafx.scene.robot.Robot`: pointer, buttons, wheel, keyboard, pixels, capture |
+| `windows`   | window styles, states, focus, modality, sizes, ownership, nested event loops, and the window bugs of the JBS on Linux |
+| `screens`   | stages, popups, dialogs and menus on other monitors and scales              |
+| `stage`     | a stage playground, without tests                                           |
+| `dialogs`   | file choosers through the portal, alerts and dialogs                        |
+| `dnd`       | drag and drop: every transfer mode and modifier, data formats, drag images, event order, windows, the pointer grab, and the Linux bugs of the JBS |
+| `clipboard` | every format, with a second process and with `wl-copy` and `wl-paste`       |
+| `render`    | shapes, paints, text, images, effects, snapshots and sRGB, and the rendering bugs of the JBS: arcs, culling, SubScene snapshots, emoji, huge glyphs, context menus, transparency |
+| `3d`        | 3D on the screen and in snapshots                                           |
+| `swing`     | SwingNode, JFXPanel and the clipboard between Swing and JavaFX              |
+| `touch`     | touch points and gestures, with the touch robot of the GTK 4 glass, or by hand |
+| `ime`       | input methods: composition, commit, cancel, focus changes, popups, table cells, the window of candidates, dead keys, and Chinese (Pinyin), Japanese, Korean and Arabic with IBus or fcitx5 (`--ime`) |
+| `scale`     | the scale of the desktop, and the bugs of the JBS at scales other than 1: sizes, layout snapping, truncated labels, tool bars, @2x images |
+| `crash`     | the bugs of the JBS that crashed JavaFX on Linux, each run in a process of its own, which fails on a fatal error, a signal or a hang |
+| `a11y`      | accessible roles, names and states, and the AT-SPI tree of the GTK 4 glass  |
+
+`--tests` takes their names, or `labs` for all of them, instead of patterns of the system
+tests. Each runs its tests and exits, one after the other in the same session, with its log
+in `RUN/logs/ENV/lab-NAME.log`:
+
+```sh
+./jfx-tester --distros=fedora:44 --headless --tests=dnd,stage,clipboard
+./jfx-tester --distros=fedora:44,ubuntu:24.04 --desktops=gnome,kde --headless --tests=labs
+```
+
+### Input methods
+
+`--ime` runs each desktop with an input method framework, `none`, `ibus` or `fcitx5`, each an
+environment of its own (`DISTRO-RELEASE-DESKTOP-ibus`). The session starts its daemon, with the
+engines of Chinese (Pinyin), Japanese (Anthy or Mozc), Korean (Hangul) and Arabic, and the tests
+get `GTK_IM_MODULE` and `XMODIFIERS`. The `ime` lab composes with the input method of GTK or of
+the framework, and switches its engines itself:
+
+```sh
+./jfx-tester --distros=fedora:44,ubuntu:24.04 --headless --tests=ime --ime=none,ibus,fcitx5
+```
+
+### JavaFX on Wayland
+
+`--wayland` runs the labs, the test lab or a manual test with the GTK 4 glass of
+[jfx-wayland](https://github.com/tsayao/jfx-wayland) (its jar, or its project after
+`./gradlew jar`), on Wayland itself rather than Xwayland, with its Vulkan, OpenGL or
+software pipeline. It needs a Wayland session, GNOME or KDE, and the JavaFX that the plugin
+was built against. The environments get `-gtk4` in their names, such as
+`fedora-45-gnome-gtk4`, and the containers GTK 4, Vulkan and the tools of the labs:
+
+```sh
+./jfx-tester --distros=fedora:45 --headless --tests=dnd,clipboard --wayland=$HOME/jfx-wayland
+./jfx-tester --distros=fedora:45 --desktops=gnome,kde --headless --tests=labs --wayland=$HOME/jfx-wayland
+```
+
 ### Test lab
 
-An interactive window with labs for the robot, windows, screens, dialogs, drag and
-drop, clipboard, rendering, 3D and Swing. It needs JDK 22 and JavaFX 27 or later.
+All the labs in one window, a tab per lab.
 
 ```sh
 # Interactive

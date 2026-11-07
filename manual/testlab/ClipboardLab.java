@@ -120,6 +120,15 @@ import java.util.stream.Collectors;
  */
 public class ClipboardLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java ClipboardLab.java</pre>
+     * or {@code ./jfx-tester --tests=clipboard}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("clipboard", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS + """
         .key { -fx-font-size: 10px; -fx-font-weight: bold; }
         .detail { -fx-font-size: 11px; }

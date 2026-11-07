@@ -46,9 +46,12 @@ import java.util.List;
 
 /**
  * The tests of the robot, windows, screens, stage, dialogs, drag and drop,
- * clipboard, render, 3D and Swing labs in one window, a
+ * clipboard, render, 3D, Swing, touch, input method and accessibility labs in
+ * one window, a
  * tab per lab, with a button that runs them all, one lab after the other, and
- * an overview of their OK, FAIL and SKIP results.
+ * an overview of their OK, FAIL and SKIP results. Each lab is an application
+ * of its own as well, whose main method starts this one with that lab only
+ * (java DragDropLab.java, or jfx-tester --tests=dnd,stage).
  * It runs with jfx-tester, on the glass of OpenJFX, in a nested desktop of each
  * distribution, whose portals the robot goes through (see lib/approve.py). The
  * other files of this directory are compiled with it by the source launcher, so
@@ -58,7 +61,9 @@ import java.util.List;
  * the application then exits, with status 1 when a test failed, which
  * jfx-tester reports as the outcome of the environment:
  * <pre>./jfx-tester --desktops=gnome --headless --manual=manual/testlab/TestLab.java --timeout=3600 --jvm-args="-Dtests.run=true -Dtests.exit=true"</pre>
- * Their results are in results/RUN/logs/ENV/manual.log.
+ * Their results are in results/RUN/logs/ENV/manual.log. -Dtests.labs=NAME,...
+ * keeps some labs, by the short names of LABS (dnd, a11y, ...) or their names
+ * without spaces, and -Dtests.only=NAME,... some tests, by name without spaces.
  */
 public class TestLab extends Application {
 
@@ -69,6 +74,100 @@ public class TestLab extends Application {
             System.setProperty("user.home", home);
         }
         launch(args);
+    }
+
+    /**
+     * Starts the test lab with one lab only, for the main method of each lab,
+     * so that each runs as an application of its own, unless -Dtests.labs
+     * chooses others.
+     */
+    static void launchLab(String id, String[] args) {
+        if (System.getProperty("tests.labs") == null) {
+            System.setProperty("tests.labs", id);
+        }
+        main(args);
+    }
+
+    /** What a lab gives the test lab: its content, stylesheet and tests (none for a playground). */
+    record Parts(Region content, String stylesheet, TestKit.Suite suite) {}
+
+    /**
+     * A lab: the short name that -Dtests.labs and jfx-tester --tests take, the
+     * name of its tab, and how to build it.
+     */
+    record LabDef(String id, String name, java.util.function.Function<Stage, Parts> factory) {}
+
+    /** The labs, in the order of their tabs and runs. */
+    static final List<LabDef> LABS = List.of(
+            new LabDef("robot", "Robot", s -> {
+                RobotLab l = new RobotLab();
+                return new Parts(l.content(s), RobotLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("windows", "Windows", s -> {
+                WindowsLab l = new WindowsLab();
+                return new Parts(l.content(s), WindowsLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("screens", "Screens", s -> {
+                ScreensLab l = new ScreensLab();
+                return new Parts(l.content(s), ScreensLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("stage", "Stage", s -> new Parts(new StageLab().content(s), StageLab.STYLESHEET, null)),
+            new LabDef("dialogs", "Dialogs", s -> {
+                DialogsLab l = new DialogsLab();
+                return new Parts(l.content(s), DialogsLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("dnd", "Drag and drop", s -> {
+                DragDropLab l = new DragDropLab();
+                return new Parts(l.content(s), DragDropLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("clipboard", "Clipboard", s -> {
+                ClipboardLab l = new ClipboardLab();
+                return new Parts(l.content(s), ClipboardLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("render", "Render", s -> {
+                RenderLab l = new RenderLab();
+                return new Parts(l.content(s), l.stylesheet(), l.suite);
+            }),
+            new LabDef("3d", "3D", s -> {
+                Scene3DLab l = new Scene3DLab();
+                return new Parts(l.content(s), Scene3DLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("swing", "Swing", s -> {
+                SwingLab l = new SwingLab();
+                return new Parts(l.content(s), SwingLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("touch", "Touch", s -> {
+                TouchLab l = new TouchLab();
+                return new Parts(l.content(s), TouchLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("ime", "Input methods", s -> {
+                ImeLab l = new ImeLab();
+                return new Parts(l.content(s), ImeLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("scale", "Scale", s -> {
+                ScaleLab l = new ScaleLab();
+                return new Parts(l.content(s), ScaleLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("crash", "Crashes", s -> {
+                CrashLab l = new CrashLab();
+                return new Parts(l.content(s), CrashLab.STYLESHEET, l.suite);
+            }),
+            new LabDef("a11y", "Accessibility", s -> {
+                AccessibilityLab l = new AccessibilityLab();
+                return new Parts(l.content(s), AccessibilityLab.STYLESHEET, l.suite);
+            }));
+
+    /**
+     * Whether -Dtests.labs keeps a lab, by its short name or its name without
+     * spaces, ignoring the case; all of them without it.
+     */
+    private static boolean selected(LabDef lab) {
+        String only = System.getProperty("tests.labs");
+        if (only == null || only.isBlank()) {
+            return true;
+        }
+        return List.of(only.split(",")).stream().map(String::strip).anyMatch(n -> n.equalsIgnoreCase(lab.id())
+                || n.equalsIgnoreCase(lab.name().replace(" ", "")));
     }
 
     private record Lab(String name, TestKit.Suite suite, Tab tab) {}
@@ -85,28 +184,23 @@ public class TestLab extends Application {
             new ClipboardLab().startReader(stage);
             return;
         }
+        // The process of a reproducer of the crash lab runs it instead
+        if (CrashLab.runReproducer(getParameters(), stage)) {
+            return;
+        }
         this.stage = stage;
 
-        RobotLab robot = new RobotLab();
-        addLab("Robot", robot.content(stage), RobotLab.STYLESHEET, robot.suite);
-        WindowsLab windows = new WindowsLab();
-        addLab("Windows", windows.content(stage), WindowsLab.STYLESHEET, windows.suite);
-        ScreensLab screens = new ScreensLab();
-        addLab("Screens", screens.content(stage), ScreensLab.STYLESHEET, screens.suite);
-        StageLab stageLab = new StageLab();
-        addLab("Stage", stageLab.content(stage), StageLab.STYLESHEET, null);
-        DialogsLab dialogs = new DialogsLab();
-        addLab("Dialogs", dialogs.content(stage), DialogsLab.STYLESHEET, dialogs.suite);
-        DragDropLab dragDrop = new DragDropLab();
-        addLab("Drag and drop", dragDrop.content(stage), DragDropLab.STYLESHEET, dragDrop.suite);
-        ClipboardLab clipboard = new ClipboardLab();
-        addLab("Clipboard", clipboard.content(stage), ClipboardLab.STYLESHEET, clipboard.suite);
-        Scene3DLab scene3d = new Scene3DLab();
-        RenderLab render = new RenderLab();
-        addLab("Render", render.content(stage), render.stylesheet(), render.suite);
-        addLab("3D", scene3d.content(stage), Scene3DLab.STYLESHEET, scene3d.suite);
-        SwingLab swing = new SwingLab();
-        addLab("Swing", swing.content(stage), SwingLab.STYLESHEET, swing.suite);
+        // Only the labs asked for are built, so that each runs as an application of its own
+        List<LabDef> chosen = LABS.stream().filter(TestLab::selected).toList();
+        if (chosen.isEmpty()) {
+            throw new IllegalArgumentException("No lab " + System.getProperty("tests.labs") + ": "
+                    + LABS.stream().map(LabDef::id).collect(java.util.stream.Collectors.joining(", ")));
+        }
+        for (LabDef lab : chosen) {
+            Parts parts = lab.factory().apply(stage);
+            addLab(lab.name(), parts.content(), parts.stylesheet(), parts.suite());
+        }
+        String title = chosen.size() == 1 ? chosen.getFirst().name() + " lab" : "Test Lab";
 
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
 
@@ -117,20 +211,15 @@ public class TestLab extends Application {
         Scene scene = new Scene(body, Math.min(1440, screen.getWidth() * 0.95), Math.min(940, screen.getHeight() * 0.94));
         scene.getStylesheets().add(TestKit.STYLESHEET);
         stage.setScene(scene);
-        stage.setTitle("Test Lab");
+        stage.setTitle(title);
         stage.setMinWidth(1100);
         stage.setMinHeight(700);
         stage.show();
+        TestKit.idle("the test lab is open: run its tests");
         TestKit.autorun(() -> run(labs));
     }
 
     private void addLab(String name, Region content, String stylesheet, TestKit.Suite suite) {
-        // -Dtests.labs=clipboard,dragAndDrop keeps only those labs, by name without spaces
-        String only = System.getProperty("tests.labs");
-        if (only != null && List.of(only.split(",")).stream()
-                .noneMatch(n -> n.equalsIgnoreCase(name.replace(" ", "")))) {
-            return;
-        }
         // The lab keeps its own rules, on the theme of JavaFX
         StackPane holder = new StackPane(content);
         holder.getStylesheets().add(stylesheet);
@@ -144,7 +233,7 @@ public class TestLab extends Application {
     }
 
     private Node header() {
-        Label brand = new Label("Test Lab");
+        Label brand = new Label(labs.size() == 1 ? labs.getFirst().name() + " lab" : "Test Lab");
         brand.getStyleClass().add("brand");
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
@@ -196,6 +285,7 @@ public class TestLab extends Application {
             TestKit.Result result = TestKit.Result.NONE;
             long start = System.nanoTime();
             boolean stopped = false;
+            TestKit.beginRun(selected.stream().mapToInt(l -> TestKit.only(l.suite().tests).size()).sum());
             try {
                 for (Lab lab : selected) {
                     TestKit.fx(() -> tabs.getSelectionModel().select(lab.tab()));
@@ -208,6 +298,7 @@ public class TestLab extends Application {
             } catch (TestKit.Stopped e) {
                 // Stopped before a lab started
             } finally {
+                TestKit.endRun();
                 stopped = TestKit.isStopping();
                 TestKit.unlock();
             }

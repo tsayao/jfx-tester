@@ -169,6 +169,15 @@ import java.util.function.DoubleConsumer;
  */
 public class RenderLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java RenderLab.java</pre>
+     * or {@code ./jfx-tester --tests=render}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("render", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS + """
         .card {
             -fx-background: #20242e;
@@ -1441,6 +1450,508 @@ public class RenderLab {
                 + "the screen (Snapshot1Test)", this::snapshotTest);
         suite.auto("Every tab renders", "Each tab of the showcase draws something, without an exception on the FX "
                 + "thread", this::tabsTest);
+        defineRegressionTests();
+    }
+
+    // ---------------------------------------------------------------------
+    // The rendering bugs of the JBS, mostly on Linux, so that they do not come back
+
+    private void defineRegressionTests() {
+        suite.auto("Arcs of every size", "JDK-8393157, JDK-8393053, JDK-8332950: 400 ArcTo of radius 1 to every "
+                + "point up to 20, 20, an SVG arc and an arc without rotation have their shapes", this::arcsTest);
+        suite.auto("Covered node keeps the scene updating", "JDK-8322619: changes a node that another one covers, "
+                + "and then the visible ones, which must still be drawn", this::coveredNodeTest);
+        suite.auto("Snapshot of a node in a SubScene", "JDK-8260013: the snapshot of a node in a SubScene with a "
+                + "perspective camera shows the node", this::subSceneSnapshotTest);
+        suite.auto("New scene renders", "JDK-8306121: a scene set on a showing stage is drawn, three times",
+                this::newSceneTest);
+        suite.auto("Zero-size SubScene", "JDK-8372761: the transforms of a 0 × 0 SubScene give finite points",
+                this::zeroSubSceneTest);
+        suite.auto("Color emoji", "JDK-8337816, JDK-8234473: an emoji is drawn in color, where a color emoji font "
+                + "is installed", this::colorEmojiTest);
+        suite.auto("Emoji in the title", "JDK-8382165: the window gets a title with an emoji and accents, as "
+                + "_NET_WM_NAME in UTF-8 (X11)", this::emojiTitleTest);
+        suite.auto("Centered text with trailing spaces", "JDK-8314215: the space where a centered text wraps does not "
+                + "move its line", this::trailingSpaceTest);
+        suite.auto("Hit test in a TextFlow", "JDK-8306083: hitTest on the second Text of a TextFlow gives the "
+                + "index of its own character", this::hitTestTest);
+        suite.auto("Huge glyphs", "JDK-8237833: text of 500 px, larger than the glyph cache, is drawn",
+                this::hugeGlyphsTest);
+        suite.auto("Context menu renders", "JDK-8242362: a context menu shown 15 times is drawn each time, as its "
+                + "snapshot", this::contextMenuTest);
+        suite.auto("Transparent stage", "JDK-8171330, JDK-8253853: a TRANSPARENT stage shows what is behind it, "
+                + "where its scene has no content", this::transparentStageTest);
+    }
+
+    private String arcsTest() {
+        return TestKit.fx(() -> {
+            List<String> empty = new ArrayList<>();
+            for (int x = 1; x <= 20; x++) {
+                for (int y = 1; y <= 20; y++) {
+                    javafx.scene.shape.Path p = new javafx.scene.shape.Path(new javafx.scene.shape.MoveTo(0, 0),
+                            new javafx.scene.shape.ArcTo(1, 1, 0, x, y, false, true));
+                    Bounds b = p.getLayoutBounds();
+                    if (Math.max(b.getWidth(), b.getHeight()) < Math.max(x, y) * 0.9) {
+                        empty.add(x + "," + y);
+                    }
+                }
+            }
+            TestKit.check(empty.isEmpty(), "JDK-8393157: ArcTo to these points has no shape: " + empty);
+            javafx.scene.shape.SVGPath svg = new javafx.scene.shape.SVGPath();
+            svg.setContent("M11.65,6.47A1.69,1.69 0 0,1 13.34,4.78");
+            Bounds s = svg.getLayoutBounds();
+            TestKit.check(s.getWidth() > 1 && s.getHeight() > 1, "JDK-8393053: the SVG arc has no shape: " + s);
+            javafx.scene.shape.ArcTo a = new javafx.scene.shape.ArcTo();
+            a.setX(113.8233880241887);
+            a.setY(316.3783247347362);
+            a.setRadiusX(9.5);
+            a.setRadiusY(9.5);
+            javafx.scene.shape.Path half = new javafx.scene.shape.Path(
+                    new javafx.scene.shape.MoveTo(119.83171557850895, 334.4033073976959), a,
+                    new javafx.scene.shape.LineTo(63.99583622283988, 332.98750866852015),
+                    new javafx.scene.shape.LineTo(70.00416377716013, 351.01249133147985),
+                    new javafx.scene.shape.ClosePath());
+            half.setFill(Color.BLACK);
+            half.setStroke(null);
+            Bounds h = half.getLayoutBounds();
+            TestKit.check(h.getMinY() <= 316.5, "JDK-8332950: the arc without rotation was skipped: the shape starts "
+                    + "at y " + h.getMinY() + ", not 316.4");
+            return "400 arcs, the SVG arc and the arc without rotation";
+        });
+    }
+
+    private String coveredNodeTest() {
+        int lines = 10;
+        Color on = Color.LIMEGREEN, off = Color.DARKGREEN;
+        List<javafx.scene.shape.Line[]> allLines = new ArrayList<>();
+        List<Circle> circles = new ArrayList<>();
+        VBox[] side = new VBox[1];
+        StackPane root = TestKit.fx(() -> {
+            HBox contents = new HBox(10);
+            contents.setPadding(new Insets(10));
+            for (int k = 0; k < 2; k++) {
+                Group group = new Group();
+                group.setManaged(false);
+                javafx.scene.shape.Line[] ls = new javafx.scene.shape.Line[lines];
+                for (int i = 0; i < lines; i++) {
+                    ls[i] = new javafx.scene.shape.Line(20, 50 + i * 10, 220, 50 + i * 10);
+                    ls[i].setStrokeWidth(4);
+                    ls[i].setStroke(off);
+                    group.getChildren().add(ls[i]);
+                }
+                Circle c = new Circle(220, 50, 5, on);
+                group.getChildren().add(c);
+                StackPane element = new StackPane(group);
+                element.setStyle("-fx-background-color: lightgrey; -fx-border-color: black;");
+                element.setMinSize(240, 200);
+                contents.getChildren().add(element);
+                allLines.add(ls);
+                circles.add(c);
+            }
+            side[0] = new VBox(new Label("Side"));
+            side[0].setMaxWidth(150);
+            side[0].setStyle("-fx-background-color: lightblue;");
+            StackPane.setAlignment(side[0], Pos.CENTER_RIGHT);
+            return new StackPane(contents, side[0]);
+        });
+        show(root, 520, 240);
+        int last = 0;
+        for (int step = 0; step < 14; step++) {
+            int index = step % lines;
+            last = index;
+            TestKit.fx(() -> {
+                for (javafx.scene.shape.Line[] ls : allLines) {
+                    for (int i = 0; i < lines; i++) {
+                        ls[i].setStroke(i == index ? on : off);
+                    }
+                }
+            });
+            TestKit.pause(120);
+            TestKit.fx(() -> circles.forEach(c -> c.setCenterY(50 + index * 10)));
+            TestKit.pause(120);
+            if (step % 3 == 0) {
+                TestKit.fx(() -> side[0].setVisible(!side[0].isVisible()));
+                TestKit.pause(100);
+            }
+        }
+        TestKit.fx(() -> side[0].setVisible(false));
+        TestKit.pause(500);
+        int lastIndex = last;
+        List<String> stale = new ArrayList<>();
+        for (int k = 0; k < 2; k++) {
+            int e = k;
+            Color seen = TestKit.fx(() -> {
+                Circle c = circles.get(e);
+                Point2D p = c.localToScreen(c.getCenterX(), c.getCenterY());
+                return TestKit.robot().getPixelColor(p);
+            });
+            Color line = TestKit.fx(() -> {
+                javafx.scene.shape.Line l = allLines.get(e)[lastIndex];
+                return TestKit.robot().getPixelColor(l.localToScreen(120, l.getStartY()));
+            });
+            if (!near(seen, on, 0.12)) {
+                stale.add("the circle of element " + (e + 1) + " is " + rgb(seen));
+            }
+            if (!near(line, on, 0.12)) {
+                stale.add("the line " + (lastIndex + 1) + " of element " + (e + 1) + " is " + rgb(line));
+            }
+        }
+        TestKit.fx(this::closeTestStage);
+        TestKit.check(stale.isEmpty(), "JDK-8322619: not drawn any more: " + String.join("; ", stale));
+        return "both elements up to date";
+    }
+
+    private String subSceneSnapshotTest() {
+        Rectangle[] rect = new Rectangle[1];
+        StackPane root = TestKit.fx(() -> {
+            rect[0] = new Rectangle(60, 60, 80, 80);
+            rect[0].setFill(Color.RED);
+            SubScene sub = new SubScene(new Group(rect[0]), 200, 200, true, SceneAntialiasing.DISABLED);
+            sub.setFill(Color.WHITE);
+            sub.setCamera(new PerspectiveCamera());
+            return new StackPane(sub);
+        });
+        show(root, 240, 240);
+        Color center = TestKit.fx(() -> {
+            WritableImage snap = rect[0].snapshot(null, null);
+            return snap.getPixelReader().getColor((int) snap.getWidth() / 2, (int) snap.getHeight() / 2);
+        });
+        TestKit.fx(this::closeTestStage);
+        TestKit.check(near(center, Color.RED, 0.1), "JDK-8260013: the snapshot of the node in the SubScene is "
+                + rgb(center) + " at its center, not red");
+        return "red";
+    }
+
+    private String newSceneTest() {
+        Rectangle first = TestKit.fx(() -> new Rectangle(200, 200, Color.web("#dc2626")));
+        StackPane root = TestKit.fx(() -> new StackPane(first));
+        show(root, 200, 200);
+        Color[] colors = {Color.web("#2563eb"), Color.web("#16a34a"), Color.web("#9333ea")};
+        for (Color c : colors) {
+            Rectangle r = TestKit.fx(() -> new Rectangle(200, 200, c));
+            TestKit.fx(() -> testStage.setScene(new Scene(new StackPane(r), 200, 200)));
+            try {
+                TestKit.await("the new scene drawn", 3000, () -> near(TestKit.robot().getPixelColor(TestKit.center(r)),
+                        c, 0.05));
+            } catch (AssertionError e) {
+                Color seen = TestKit.fx(() -> TestKit.robot().getPixelColor(TestKit.center(r)));
+                TestKit.fx(this::closeTestStage);
+                throw new AssertionError("JDK-8306121: the new scene is not drawn: " + rgb(seen) + ", not " + rgb(c));
+            }
+        }
+        TestKit.fx(this::closeTestStage);
+        return "3 scenes drawn";
+    }
+
+    private String zeroSubSceneTest() {
+        return TestKit.fx(() -> {
+            Rectangle r = new Rectangle(10, 10, 20, 20);
+            SubScene sub = new SubScene(new Group(r), 0, 0);
+            Scene scene = new Scene(new Group(sub), 100, 100);
+            List<String> bad = new ArrayList<>();
+            for (javafx.scene.Camera camera : List.of(new ParallelCamera(), new PerspectiveCamera())) {
+                sub.setCamera(camera);
+                Point2D p = r.localToScene(15, 15);
+                Point2D q = r.sceneToLocal(5, 5);
+                if (p == null || !Double.isFinite(p.getX()) || !Double.isFinite(p.getY())
+                        || (q != null && (!Double.isFinite(q.getX()) || !Double.isFinite(q.getY())))) {
+                    bad.add(camera.getClass().getSimpleName() + ": " + p + ", " + q);
+                }
+            }
+            TestKit.check(scene != null && bad.isEmpty(), "JDK-8372761: points that are not finite: " + bad);
+            return "finite with both cameras";
+        });
+    }
+
+    private static String fcList(String pattern) {
+        try {
+            Process p = new ProcessBuilder("fc-list", pattern, "family").redirectErrorStream(true).start();
+            String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS);
+            return out.strip();
+        } catch (java.io.IOException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    private String colorEmojiTest() {
+        String fonts = fcList(":charset=1f600:color=true");
+        if (fonts == null || fonts.isEmpty()) {
+            TestKit.skip("no color emoji font (fc-list :charset=1f600:color=true)");
+        }
+        Text emoji = TestKit.fx(() -> {
+            Text t = new Text(new StringBuilder().appendCodePoint(0x1F600).appendCodePoint(0x1F680).toString());
+            t.setFont(Font.font(72));
+            return t;
+        });
+        StackPane root = TestKit.fx(() -> {
+            StackPane p = new StackPane(emoji);
+            p.setStyle("-fx-background-color: white;");
+            return p;
+        });
+        show(root, 260, 140);
+        int[] counts = TestKit.fx(() -> {
+            Bounds b = emoji.localToScreen(emoji.getLayoutBounds());
+            WritableImage image = TestKit.robot().getScreenCapture(null, b.getMinX(), b.getMinY(), b.getWidth(),
+                    b.getHeight());
+            int colored = 0, drawn = 0;
+            for (int y = 0; y < image.getHeight(); y++) {
+                for (int x = 0; x < image.getWidth(); x++) {
+                    Color c = image.getPixelReader().getColor(x, y);
+                    if (c.getBrightness() < 0.95 || c.getSaturation() > 0.1) {
+                        drawn++;
+                    }
+                    if (c.getSaturation() > 0.4 && c.getBrightness() > 0.3) {
+                        colored++;
+                    }
+                }
+            }
+            return new int[] {drawn, colored};
+        });
+        TestKit.fx(this::closeTestStage);
+        TestKit.check(counts[0] > 100, "the emoji is not drawn (" + counts[0] + " pixels)");
+        TestKit.check(counts[1] > 100, "JDK-8337816: the emoji is drawn in gray: " + counts[1] + " colored pixels of "
+                + counts[0] + ", with " + fonts.lines().findFirst().orElse(""));
+        return counts[1] + " colored pixels, " + fonts.lines().findFirst().orElse("");
+    }
+
+    private String emojiTitleTest() {
+        if ("Gtk4".equalsIgnoreCase(System.getProperty("glass.platform")) || System.getenv("DISPLAY") == null) {
+            TestKit.skip("the title is read with xprop, from X11");
+        }
+        String token = String.valueOf(System.nanoTime());
+        String title = "Title 👍 ação " + token;
+        StackPane root = TestKit.fx(() -> new StackPane(new Label("Title")));
+        show(root, 200, 100);
+        TestKit.fx(() -> testStage.setTitle(title));
+        TestKit.pause(500);
+        String found = null;
+        try {
+            String list = run("xprop", "-root", "_NET_CLIENT_LIST");
+            if (list == null) {
+                TestKit.skip("xprop is not installed");
+            }
+            for (String id : list.replaceAll(".*#", "").split(",")) {
+                String name = run("xprop", "-id", id.strip(), "-notype", "_NET_WM_NAME");
+                if (name != null && name.contains(token)) {
+                    found = name.replaceAll("^[^=]*= ?\"?", "").replaceAll("\"\\s*$", "");
+                    break;
+                }
+            }
+        } finally {
+            TestKit.fx(this::closeTestStage);
+        }
+        TestKit.check(found != null, "JDK-8382165: no window has the title in _NET_WM_NAME, as \"" + title + "\"");
+        TestKit.check(found.equals(title), "JDK-8382165: the title is \"" + found + "\", expected \"" + title + "\"");
+        return "\"" + found + "\"";
+    }
+
+    private static String run(String... command) {
+        try {
+            Process p = new ProcessBuilder(command).redirectErrorStream(true).start();
+            String out = new String(p.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            return p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0 ? out.strip() : null;
+        } catch (java.io.IOException e) {
+            return null;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    private String trailingSpaceTest() {
+        return TestKit.fx(() -> {
+            // Three words that wrap one per line: the first two lines end with the space where they wrap
+            Text t = new Text("AAA AAA AAA");
+            t.setFont(Font.font("Monospaced", 40));
+            t.setTextAlignment(javafx.scene.text.TextAlignment.CENTER);
+            Text word = new Text("AAA ");
+            word.setFont(t.getFont());
+            new Scene(new Group(word));
+            double wrap = Math.ceil(word.getLayoutBounds().getWidth()) + 10;
+            t.setWrappingWidth(wrap);
+            new Scene(new Group(t));
+            double[] x = new double[3];
+            for (int i = 0; i < 3; i++) {
+                x[i] = new javafx.scene.shape.Path(t.rangeShape(i * 4, i * 4 + 3)).getLayoutBounds().getMinX();
+            }
+            TestKit.check(Math.abs(x[0] - x[2]) < 1 && Math.abs(x[1] - x[2]) < 1, String.format(Locale.ROOT,
+                    "JDK-8314215: the wrapped lines start at x %.1f, %.1f and %.1f: the trailing spaces move them",
+                    x[0], x[1], x[2]));
+            return String.format(Locale.ROOT, "the three lines at x %.1f", x[2]);
+        });
+    }
+
+    private String hitTestTest() {
+        return TestKit.fx(() -> {
+            Text first = new Text("Normal ");
+            Text bold = new Text("BOLD");
+            Text last = new Text(" text");
+            for (Text t : List.of(first, bold, last)) {
+                t.setFont(Font.font("System", t == bold ? FontWeight.BOLD : FontWeight.NORMAL, 48));
+            }
+            javafx.scene.text.TextFlow flow = new javafx.scene.text.TextFlow(first, bold, last);
+            new Scene(new Group(flow));
+            flow.applyCss();
+            flow.layout();
+            List<String> wrong = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                Bounds b = new javafx.scene.shape.Path(bold.rangeShape(i, i + 1)).getLayoutBounds();
+                // A third of the glyph in, on its leading side
+                Point2D p = new Point2D(b.getMinX() + b.getWidth() / 3, b.getCenterY());
+                int index = bold.hitTest(p).getCharIndex();
+                if (index != i) {
+                    wrong.add("'" + "BOLD".charAt(i) + "' gave " + index);
+                }
+            }
+            TestKit.check(wrong.isEmpty(), "JDK-8306083: wrong character indexes: " + wrong);
+            return "B O L D at 0 1 2 3";
+        });
+    }
+
+    private String hugeGlyphsTest() {
+        Text text = TestKit.fx(() -> {
+            Text t = new Text("Wg");
+            t.setFont(Font.font(500));
+            t.setFill(Color.BLACK);
+            return t;
+        });
+        StackPane root = TestKit.fx(() -> {
+            StackPane p = new StackPane(text);
+            p.setStyle("-fx-background-color: white;");
+            return p;
+        });
+        Rectangle2D screen = TestKit.fx(() -> javafx.stage.Screen.getPrimary().getVisualBounds());
+        show(root, Math.min(1000, screen.getWidth() - 40), Math.min(700, screen.getHeight() - 40));
+        double dark = TestKit.fx(() -> {
+            Bounds b = root.localToScreen(root.getLayoutBounds());
+            WritableImage image = TestKit.robot().getScreenCapture(null, b.getMinX(), b.getMinY(), b.getWidth(),
+                    b.getHeight());
+            int n = 0, total = 0;
+            for (int y = 0; y < image.getHeight(); y += 4) {
+                for (int x = 0; x < image.getWidth(); x += 4) {
+                    total++;
+                    if (image.getPixelReader().getColor(x, y).getBrightness() < 0.3) {
+                        n++;
+                    }
+                }
+            }
+            return (double) n / total;
+        });
+        TestKit.fx(this::closeTestStage);
+        TestKit.check(dark > 0.05, String.format(Locale.ROOT, "JDK-8237833: the huge glyphs are not drawn: %.1f%% "
+                + "of the window is dark", dark * 100));
+        return String.format(Locale.ROOT, "%.0f%% of the window is glyph", dark * 100);
+    }
+
+    private String contextMenuTest() {
+        Button button = TestKit.fx(() -> new Button("Menu"));
+        show(TestKit.fx(() -> new StackPane(button)), 300, 200);
+        javafx.scene.control.ContextMenu menu = TestKit.fx(() -> new javafx.scene.control.ContextMenu(
+                new javafx.scene.control.MenuItem("First item"), new javafx.scene.control.MenuItem("Second item"),
+                new javafx.scene.control.MenuItem("Third item")));
+        List<Integer> blank = new ArrayList<>();
+        String[] detail = {""};
+        try {
+            for (int i = 1; i <= 15; i++) {
+                TestKit.fx(() -> menu.show(button, javafx.geometry.Side.BOTTOM, 0, 0));
+                TestKit.await("the menu", 3000, () -> menu.isShowing() && menu.getScene() != null
+                        && menu.getScene().getRoot().getLayoutBounds().getWidth() > 0);
+                TestKit.pause(250);
+                double diff = TestKit.fx(() -> {
+                    Node r = menu.getScene().getRoot();
+                    WritableImage snap = r.snapshot(null, null);
+                    Bounds b = r.localToScreen(r.getLayoutBounds());
+                    WritableImage screen = TestKit.robot().getScreenCapture(null, b.getMinX(), b.getMinY(),
+                            b.getWidth(), b.getHeight(), false);
+                    // The snapshot covers the shadow of the menu too: its layout bounds start further in
+                    Bounds layout = r.getLayoutBounds(), all = r.getBoundsInLocal();
+                    int dx = (int) Math.round(layout.getMinX() - all.getMinX());
+                    int dy = (int) Math.round(layout.getMinY() - all.getMinY());
+                    int w = (int) Math.min(snap.getWidth() - dx, screen.getWidth());
+                    int h = (int) Math.min(snap.getHeight() - dy, screen.getHeight());
+                    double sum = 0;
+                    int n = 0;
+                    for (int y = 3; y < h - 3; y += 3) {
+                        for (int x = 3; x < w - 3; x += 3) {
+                            Color a = snap.getPixelReader().getColor(x + dx, y + dy);
+                            Color c = screen.getPixelReader().getColor(x, y);
+                            // Only the opaque body of the menu: its shadow is translucent over the window behind
+                            if (a.getOpacity() < 0.99) {
+                                continue;
+                            }
+                            sum += (Math.abs(a.getRed() - c.getRed()) + Math.abs(a.getGreen() - c.getGreen())
+                                    + Math.abs(a.getBlue() - c.getBlue())) / 3;
+                            n++;
+                        }
+                    }
+                    Color a = snap.getPixelReader().getColor(w / 2 + dx, h / 2 + dy);
+                    Color c = screen.getPixelReader().getColor(w / 2, h / 2);
+                    detail[0] = String.format(Locale.ROOT, "mean difference %.3f over %d pixels; snapshot %.0f × %.0f, "
+                            + "screen %.0f × %.0f at %.0f, %.0f; center %s on the screen, %s in the snapshot",
+                            n == 0 ? 1 : sum / n, n, snap.getWidth(), snap.getHeight(), screen.getWidth(),
+                            screen.getHeight(), b.getMinX(), b.getMinY(), rgb(c), rgb(a));
+                    return n == 0 ? 1 : sum / n;
+                });
+                if (diff > 0.08) {
+                    blank.add(i);
+                }
+                TestKit.fx(menu::hide);
+                TestKit.pause(150);
+            }
+        } finally {
+            TestKit.fx(() -> {
+                menu.hide();
+                closeTestStage();
+            });
+        }
+        TestKit.check(blank.isEmpty(), "JDK-8242362: the menu was not drawn as its snapshot the times " + blank
+                + " of 15: " + detail[0]);
+        return "drawn 15 times";
+    }
+
+    private String transparentStageTest() {
+        Rectangle back = TestKit.fx(() -> new Rectangle(300, 300, Color.MAGENTA));
+        show(TestKit.fx(() -> new StackPane(back)), 300, 300);
+        Stage[] transparent = new Stage[1];
+        Circle circle = TestKit.fx(() -> new Circle(40, Color.web("#0ea5e9")));
+        try {
+            TestKit.fx(() -> {
+                Stage s = new Stage(StageStyle.TRANSPARENT);
+                s.initOwner(testStage);
+                StackPane p = new StackPane(circle);
+                p.setStyle("-fx-background-color: transparent;");
+                Scene scene = new Scene(p, 200, 200);
+                scene.setFill(Color.TRANSPARENT);
+                s.setScene(scene);
+                s.setX(testStage.getX() + 50);
+                s.setY(testStage.getY() + 50);
+                s.show();
+                transparent[0] = s;
+            });
+            TestKit.await("the transparent stage", 5000, () -> circle.localToScreen(0, 0) != null);
+            TestKit.pause(600);
+            Color through = TestKit.fx(() -> {
+                Bounds b = circle.getScene().getRoot().localToScreen(circle.getScene().getRoot().getLayoutBounds());
+                return TestKit.robot().getPixelColor(b.getMinX() + 10, b.getMinY() + 10);
+            });
+            Color center = TestKit.fx(() -> TestKit.robot().getPixelColor(TestKit.center(circle)));
+            TestKit.check(near(center, Color.web("#0ea5e9"), 0.08), "the circle of the transparent stage is "
+                    + rgb(center));
+            TestKit.check(near(through, Color.MAGENTA, 0.08), "the transparent area shows " + rgb(through)
+                    + ", not the magenta window behind");
+            return "magenta through it, the circle drawn";
+        } finally {
+            TestKit.fx(() -> {
+                if (transparent[0] != null) {
+                    transparent[0].hide();
+                }
+                closeTestStage();
+            });
+        }
     }
 
     private void closeTestStage() {

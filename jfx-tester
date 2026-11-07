@@ -81,8 +81,31 @@
 #                           which draw at the scale 1 and KWin scales them
 #                           (apps). With monitors of different scales, KWin
 #                           scales the windows on the others either way
-#   --tests=PATTERN,...     tests to run, as Gradle --tests takes them, such
-#                           as test.robot.javafx.stage.* (without it, all)
+#   --tests=PATTERN,...     system tests to run, as Gradle --tests takes them,
+#                           such as test.robot.javafx.stage.* (without it, all)
+#   --tests=LAB,...         or labs of manual/testlab to run instead, each an
+#                           application of its own that runs its tests and
+#                           exits, one after the other in the same session:
+#                           robot, windows, screens, stage, dialogs, dnd,
+#                           clipboard, render, 3d, swing, touch, ime, scale,
+#                           crash and a11y, or
+#                           labs for all of them. Each gets RUN/logs/ENV/lab-LAB.log
+#                           (and manual.log has them all); --timeout is for each
+#   --ime=F,...             input method frameworks to run each desktop with:
+#                           none, ibus or fcitx5 (none). The session starts the
+#                           framework, with the engines of Chinese (Pinyin),
+#                           Japanese, Korean and Arabic, and gives the tests
+#                           GTK_IM_MODULE and XMODIFIERS, for the ime lab and
+#                           the system tests alike; the environments are named
+#                           DISTRO-RELEASE-DESKTOP-ibus or -fcitx5
+#   --wayland=JAR|DIR       run the labs, the test lab or a .java manual test
+#                           with the GTK 4 glass of jfx-wayland (its jar, or its
+#                           project with build/libs/jfx-wayland.jar), on
+#                           Wayland itself instead of Xwayland, with its Vulkan,
+#                           OpenGL or software pipeline: JavaFX on Wayland. It
+#                           needs a Wayland session (gnome or kde), and the
+#                           JavaFX that the plugin was built against; the
+#                           environments are named DISTRO-RELEASE-DESKTOP-gtk4
 #   --skip-webkit           leave out the system tests that need the natives
 #                           of WebKit, for a build without -PCOMPILE_WEBKIT=true
 #   --test-timeout=TIME     the time after which a system test fails, such as
@@ -202,7 +225,8 @@
 # below the output, from the copy and the build to the tests, with the classes done,
 # how many tests passed, failed and were skipped, and an estimate of the time left. With
 # --parallel, the output has only these bars. When the output is not a terminal, each
-# test class prints a PROGRESS line instead.
+# test class prints a PROGRESS line instead. So does the test lab, for each of its
+# tests, with the one that runs.
 #
 # Examples:
 #   ./jfx-tester --source=$HOME/jfx
@@ -212,6 +236,9 @@
 #   ./jfx-tester --distros=fedora:rawhide --yes -- -PUNSTABLE_TEST=true
 #   ./jfx-tester --distros=ubuntu:24.04 --desktops=kde --manual=$HOME/jfx/tests/manual/UI/WindowResizableTest.java
 #   ./jfx-tester --distros=arch --desktops=kde --sdk=$HOME/javafx-sdk-25 --jdk-version=25 --manual=Hello.java
+#   ./jfx-tester --distros=fedora:44 --tests=dnd,clipboard --headless
+#   ./jfx-tester --distros=fedora:44,ubuntu:24.04 --tests=ime --ime=none,ibus,fcitx5 --headless
+#   ./jfx-tester --distros=fedora:45 --tests=labs --wayland=$HOME/jfx-wayland --headless
 #   ./jfx-tester --distros=fedora:44 --testlab --headless --jvm-args=-Dtests.labs=robot,windows
 #   ./jfx-tester --distros=fedora:44 --testlab --robot=libei
 
@@ -225,6 +252,9 @@ XWAYLAND_SCALE=apps
 TESTS=
 MANUAL=
 TESTLAB=
+LAB_RUN=
+WAYLAND=
+IMES=
 ROBOT=javafx
 SKIP_WEBKIT=
 TEST_TIMEOUT=60s
@@ -285,6 +315,8 @@ while [ $# -gt 0 ]; do
         --tests=*) TESTS=${1#*=} ;;
         --manual=*) MANUAL=${1#*=} ;;
         --testlab) TESTLAB=1 ;;
+        --wayland=*) WAYLAND=${1#*=} ;;
+        --ime=*) IMES=${1#*=} ;;
         --robot=*) ROBOT=${1#*=} ;;
         --skip-webkit) SKIP_WEBKIT=1 ;;
         --test-timeout=*) TEST_TIMEOUT=${1#*=} ;;
@@ -317,6 +349,32 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
+
+# --tests takes the names of labs (dnd,stage,...), each an application of its
+# own that runs its tests and exits, or patterns of the system tests, not both
+if [ -n "$TESTS" ]; then
+    labs= patterns=
+    for t in $(printf '%s' "$TESTS" | tr ',' ' '); do
+        if [ "$t" = labs ]; then
+            for l in $LABS; do labs="$labs ${l%%:*}"; done
+        elif lab_file "$t" > /dev/null; then
+            labs="$labs $t"
+        else
+            patterns="$patterns${patterns:+,}$t"
+        fi
+    done
+    if [ -n "$labs" ]; then
+        [ -n "$patterns" ] && fail "--tests takes either labs, $(for l in $LABS; do printf '%s ' "${l%%:*}"; done)\
+or labs, or patterns of the system tests, not both: $patterns"
+        [ -n "$MANUAL$TESTLAB" ] && fail "--tests=$TESTS runs labs: leave out --manual and --testlab"
+        for l in $labs; do
+            case " $LAB_RUN " in *" $l:"*) continue ;; esac
+            LAB_RUN="$LAB_RUN${LAB_RUN:+ }$l:$(lab_file "$l")"
+        done
+        TESTLAB=1
+        TESTS=
+    fi
+fi
 GRADLE_EXTRA="$*"
 
 # A duration of JUnit: a number and a unit, seconds without one
@@ -418,6 +476,12 @@ for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
         *) echo "Unknown desktop: $desktop (gnome, kde or cinnamon)" >&2; exit 2 ;;
     esac
 done
+for ime in $(printf '%s' "$IMES" | tr ',' ' '); do
+    case "$ime" in
+        none|ibus|fcitx5) ;;
+        *) echo "Unknown input method framework: $ime (none, ibus or fcitx5)" >&2; exit 2 ;;
+    esac
+done
 for session in $(printf '%s' "$SESSIONS" | tr ',' ' '); do
     case "$session" in
         wayland|x11|xorg) ;;
@@ -456,17 +520,30 @@ case "$ROBOT" in
 esac
 [ -z "$SKIP_WEBKIT" ] || [ -z "$MANUAL$TESTLAB" ] \
     || fail "--skip-webkit is for the system tests, not for a manual test"
-# The test lab, a manual test that runs by itself when there is no window
+# The test lab, a manual test that runs by itself when there is no window,
+# or its labs of --tests, which always run their tests and exit
 if [ -n "$TESTLAB" ]; then
     [ -n "$MANUAL" ] && fail "Give either --testlab or --manual, not both"
     MANUAL=$ROOT/manual/testlab/TestLab.java
     if [ "$ROBOT" = libei ]; then
         JVM_ARGS="-Dtests.input=libei --enable-native-access=ALL-UNNAMED${JVM_ARGS:+ $JVM_ARGS}"
     fi
-    if [ -n "$HEADLESS" ]; then
+    if [ -n "$HEADLESS" ] || [ -n "$LAB_RUN" ]; then
         TIMEOUT=${TIMEOUT:-3600}
         JVM_ARGS="-Dtests.run=true -Dtests.exit=true${JVM_ARGS:+ $JVM_ARGS}"
     fi
+fi
+# The GTK 4 glass of jfx-wayland, its jar or its project, for JavaFX on
+# Wayland itself rather than on Xwayland
+if [ -n "$WAYLAND" ]; then
+    [ -d "$WAYLAND" ] && WAYLAND=$WAYLAND/build/libs/jfx-wayland.jar
+    [ -f "$WAYLAND" ] || fail "No jar of jfx-wayland at $WAYLAND (build it with ./gradlew jar in jfx-wayland)"
+    WAYLAND=$(cd "$(dirname "$WAYLAND")" && pwd)/$(basename "$WAYLAND")
+    [ -n "$MANUAL" ] || fail "--wayland runs the labs (--tests=dnd,...), the test lab or a manual test, not the \
+system tests"
+    case "$MANUAL" in
+        *.jar) fail "--wayland puts the glass on the class path, which java -jar ignores: give a .java source" ;;
+    esac
 fi
 # The manual test, a .java source or a .jar anywhere on the host
 [ -n "$TIMEOUT" ] && [ -z "$MANUAL" ] && fail "--timeout is for a manual test (--manual)"
@@ -543,8 +620,10 @@ ensure_packages() {
         [ -n "$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")" ] && continue
         packages="$packages $(packages_desktop "$DISTRO" "$desktop")"
         packages="$packages $(packages_session "$DISTRO" "$desktop" "$SESSION")"
+        [ -n "$IME" ] && packages="$packages $(packages_ime "$DISTRO" "$IME" "$WAYLAND")"
     done
     [ "$ROBOT" = libei ] && packages="$packages $(packages_libei "$DISTRO")"
+    [ -n "$WAYLAND" ] && packages="$packages $(packages_wayland "$DISTRO")"
     missing=$(in_container sh -c "$(missing_script "$DISTRO")" sh $packages) || return 1
     if [ -n "$missing" ]; then
         echo "Packages missing in $CONTAINER: $missing"
@@ -552,10 +631,18 @@ ensure_packages() {
         in_container sh -c "$(install_script "$DISTRO")" sh $missing || return 1
     fi
     # The optional packages are tried once per container, as a release may not
-    # have them
-    for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
+    # have them: those of the desktops, and the engines of the languages of
+    # each input method framework
+    optional_sets=$(printf '%s' "$DESKTOPS" | tr ',' ' ')
+    for ime in $(printf '%s' "$IMES" | tr ',' ' '); do
+        [ "$ime" = none ] || optional_sets="$optional_sets ime-$ime"
+    done
+    for desktop in $optional_sets; do
         stamp=$WORK/optional/$CONTAINER-$desktop
-        optional=$(packages_optional "$DISTRO" "$desktop")
+        case "$desktop" in
+            ime-*) optional=$(packages_ime_optional "$DISTRO" "${desktop#ime-}") ;;
+            *) optional=$(packages_optional "$DISTRO" "$desktop") ;;
+        esac
         [ -z "$optional" ] || [ "$(cat "$stamp" 2>/dev/null)" = "$optional" ] && continue
         missing=$(in_container sh -c "$(missing_script "$DISTRO")" sh $optional)
         for p in $missing; do
@@ -630,7 +717,7 @@ exit 1'
 # What the bar of the environment or distribution BAR shows before the tests. It
 # has a line with - when it is over, which only the bars of a terminal take
 stage() {
-    [ -z "$MANUAL" ] && [ -n "$BAR" ] || return 0
+    { [ -z "$MANUAL" ] || [ -n "$TESTLAB" ]; } && [ -n "$BAR" ] || return 0
     echo "PROGRESS $BAR [....................]   0% $1"
 }
 
@@ -801,6 +888,7 @@ run_tests() {
         JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_REPORT="$REPORTS/$env" \
         JT_ENV="$env" JT_MONITORS="$MONITORS" JT_HEADLESS="$HEADLESS" \
         JT_HOME="$WORK/home/$HOME_ID" JT_OWNER=$$ JT_JVM_ARGS="$JVM_ARGS" JT_MUTTER_DEBUG="$MUTTER_DEBUG_TOPICS" JT_COMPOSITOR_ENV="$COMPOSITOR_ENV" JT_SKIP_WEBKIT="$SKIP_WEBKIT" \
+        JT_IME="$IME" \
         dbus-run-session -- sh "$(container_path "$ROOT/lib/session.sh")" "$@" $GRADLE_EXTRA
 }
 
@@ -809,9 +897,10 @@ run_manual() {
     background in_container env JAVA_HOME="$JAVA_HOME_IN" \
         JT_DESKTOP="$desktop" JT_SESSION="$(session_type "$desktop" "$SESSION")" JT_XORG="$XORG" \
         JT_XWAYLAND_SCALE="$XWAYLAND_SCALE" \
-        JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_MONITORS="$MONITORS" \
+        JT_WORKSPACE="$WORKSPACE" JT_LOGS="$LOGS/$env" JT_MONITORS="$MONITORS" JT_ENV="$env" \
         JT_HOME="$WORK/home/$HOME_ID" JT_OWNER=$$ JT_HEADLESS="$HEADLESS" \
         JT_MANUAL="$(container_path "$MANUAL")" JT_TIMEOUT="$TIMEOUT" JT_SDK="${SDK:+$(container_path "$SDK")}" JT_JVM_ARGS="$JVM_ARGS" JT_MUTTER_DEBUG="$MUTTER_DEBUG_TOPICS" JT_COMPOSITOR_ENV="$COMPOSITOR_ENV" \
+        JT_LABS="$LAB_RUN" JT_WAYLAND="${WAYLAND:+$(container_path "$WAYLAND")}" JT_IME="$IME" \
         dbus-run-session -- sh "$(container_path "$ROOT/lib/session.sh")" $GRADLE_EXTRA
 }
 
@@ -824,18 +913,35 @@ for desktop in $(printf '%s' "$DESKTOPS" | tr ',' ' '); do
         [ "$session" = default ] && session=
         [ "$(session_type "$desktop" "$session")" = "$(session_type "$desktop" "")" ] \
             && [ "$session" != xorg ] && session=
-        case " $UNITS " in
-            *" $desktop/$session "*) ;;
-            *) UNITS="$UNITS $desktop/$session" ;;
-        esac
+        # And with each input method framework of --ime
+        for ime in $(printf '%s' "${IMES:-none}" | tr ',' ' '); do
+            case " $UNITS " in
+                *" $desktop/$session/$ime "*) ;;
+                *) UNITS="$UNITS $desktop/$session/$ime" ;;
+            esac
+        done
     done
 done
+
+# The GTK 4 glass is a Wayland client: it needs a Wayland session
+if [ -n "$WAYLAND" ]; then
+    for unit in $UNITS; do
+        d=${unit%%/*}
+        sess=${unit#*/}
+        sess=${sess%/*}
+        [ "$(session_type "$d" "$sess")" = wayland ] \
+            || fail "--wayland needs a Wayland session, which $d ${sess:-by default} is not (use gnome or kde)"
+    done
+fi
 
 # Sets desktop, SESSION and XORG of an environment of UNITS, and HOME_ID, the
 # name of its home in WORK/home
 set_unit() {
     desktop=${1%%/*}
     SESSION=${1#*/}
+    IME=${SESSION#*/}
+    SESSION=${SESSION%/*}
+    [ "$IME" = none ] && IME=
     XORG=
     [ "$SESSION" = xorg ] && XORG=1
     HOME_ID=jfx-tester-$(env_base)
@@ -848,6 +954,10 @@ env_base() {
     if [ -n "$SESSION" ]; then
         name=$name-$SESSION
     fi
+    # The GTK 4 glass of jfx-wayland, on Wayland itself
+    [ -n "$WAYLAND" ] && name=$name-gtk4
+    # The input method framework
+    [ -n "$IME" ] && name=$name-$IME
     echo "$name"
 }
 
@@ -898,10 +1008,14 @@ run_environment() {
     if [ -n "$MANUAL" ]; then
         run_manual
         status=$?
+        what=$(basename "$MANUAL")
+        [ -n "$LAB_RUN" ] && what="labs $(for l in $LAB_RUN; do printf '%s ' "${l%%:*}"; done)"
         if [ $status -eq 0 ]; then
-            outcome "$env" OK "$(basename "$MANUAL")"
+            outcome "$env" OK "$what"
+        elif [ -n "$LAB_RUN" ]; then
+            outcome "$env" FAIL "${what}failed: $(cat "$LOGS/$env/labs.failed" 2>/dev/null)"
         else
-            outcome "$env" FAIL "$(basename "$MANUAL") exited with $status"
+            outcome "$env" FAIL "$what exited with $status"
         fi
     else
         run_tests
@@ -916,7 +1030,11 @@ run_environment() {
     rm -rf "${LOGS:?}/${env:?}/config"
     unlock_home
     echo "== $env: $(cut -f1 "$LOGS/$env/outcome")"
-    [ -d "$LOGS/$env/junit" ] || stage "$(cut -f1 "$LOGS/$env/outcome"): no tests ran, see $LOGS/$env"
+    if [ -n "$TESTLAB" ]; then
+        stage "$(cut -f1 "$LOGS/$env/outcome"): the test lab closed, see $LOGS/$env/manual.log${LAB_RUN:+ and lab-*.log}"
+    elif [ ! -d "$LOGS/$env/junit" ]; then
+        stage "$(cut -f1 "$LOGS/$env/outcome"): no tests ran, see $LOGS/$env"
+    fi
 }
 
 # The workspace, ready for the tests: copied and built with --source, or as it
@@ -1084,7 +1202,7 @@ summarize() {
 # each environment, in a terminal, with colors and with a total for many of them.
 # A line each second moves them, and tells when an environment stopped moving
 start_bars() {
-    [ -t 1 ] && [ -z "$MANUAL" ] || return 0
+    [ -t 1 ] && { [ -z "$MANUAL" ] || [ -n "$TESTLAB" ]; } || return 0
     BARS_FIFO=$RUN/progress.fifo
     mkfifo "$BARS_FIFO" || return 0
     columns=$(tput cols 2>/dev/null)
@@ -1211,7 +1329,7 @@ start_bars() {
             sub(/^\[[#.]+\] +/, "", text)
             percent[e] = text + 0
             sub(/^[0-9]+% /, "", text)
-            if (split(text, n, /[\/ ,]+/) >= 10 && n[3] == "classes" && n[5] == "passed" && n[7] == "failed" && n[9] == "skipped") {
+            if (split(text, n, /[\/ ,]+/) >= 10 && (n[3] == "classes" || n[3] == "tests") && n[5] == "passed" && n[7] == "failed" && n[9] == "skipped") {
                 if (passed[e] != n[4] || failed[e] != n[6] || skipped[e] != n[8] || !(e in moved)) moved[e] = tick
                 total[e] = n[2] + 0; done[e] = n[1] + 0
                 passed[e] = n[4] + 0; failed[e] = n[6] + 0; skipped[e] = n[8] + 0

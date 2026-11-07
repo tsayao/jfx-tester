@@ -89,6 +89,15 @@ import java.util.function.Supplier;
  */
 public class DialogsLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java DialogsLab.java</pre>
+     * or {@code ./jfx-tester --tests=dialogs}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("dialogs", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS;
 
     static final String STYLESHEET = "data:text/css;base64,"

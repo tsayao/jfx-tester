@@ -111,6 +111,15 @@ import java.util.function.DoubleConsumer;
  */
 public class StageLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java StageLab.java</pre>
+     * or {@code ./jfx-tester --tests=stage}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("stage", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS + """
         .title { -fx-font-size: 22px; -fx-font-weight: bold; }
         .hero { -fx-font-size: 30px; -fx-font-weight: bold; }

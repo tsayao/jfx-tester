@@ -84,6 +84,15 @@ import java.util.function.Supplier;
  */
 public class Scene3DLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java Scene3DLab.java</pre>
+     * or {@code ./jfx-tester --tests=3d}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("3d", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS + """
         .view3d { -fx-background-color: black; }
         """;

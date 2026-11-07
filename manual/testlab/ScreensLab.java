@@ -63,6 +63,15 @@ import java.util.Locale;
  */
 public class ScreensLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java ScreensLab.java</pre>
+     * or {@code ./jfx-tester --tests=screens}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("screens", args);
+    }
+
     static final String STYLESHEET = WindowsLab.STYLESHEET;
     private static final double SCALE_TOLERANCE = 0.01;
     private static final double BOUNDS_TOLERANCE = 2;
@@ -296,6 +305,89 @@ public class ScreensLab {
             } finally {
                 TestKit.fx(alert::close);
             }
+        });
+        suite.robot("Menu after moving to the second screen", "JDK-8274165, JDK-8273204: the menu of a menu bar "
+                + "opens and takes the click on a stage moved to the second screen", () -> {
+            List<Screen> screens = requireScreens(true);
+            Stage s = testStage("Menu", screens.get(0));
+            boolean[] picked = {false};
+            javafx.scene.control.Menu menu = TestKit.fx(() -> {
+                javafx.scene.control.Menu m = new javafx.scene.control.Menu("File");
+                MenuItem item = new MenuItem("Open");
+                item.setId("screens-open");
+                item.setOnAction(e -> picked[0] = true);
+                m.getItems().add(item);
+                javafx.scene.control.MenuBar bar = new javafx.scene.control.MenuBar(m);
+                javafx.scene.layout.BorderPane root = new javafx.scene.layout.BorderPane();
+                root.setTop(bar);
+                s.setScene(new javafx.scene.Scene(root, 360, 240));
+                return m;
+            });
+            TestKit.fx(() -> place(s, screens.get(1)));
+            awaitScale(s, screens.get(1));
+            TestKit.pause(500);
+            Node title = TestKit.fx(() -> s.getScene().getRoot().lookup(".menu"));
+            TestKit.click(title);
+            TestKit.await("the menu shown", 3000, menu::isShowing);
+            Node item = TestKit.fx(() -> {
+                for (javafx.stage.Window w : javafx.stage.Window.getWindows()) {
+                    if (w.getScene() != null && w.getScene().lookup("#screens-open") != null) {
+                        return w.getScene().lookup("#screens-open");
+                    }
+                }
+                return null;
+            });
+            TestKit.check(item != null, "the menu has no item on screen");
+            TestKit.pause(300);
+            TestKit.click(item);
+            TestKit.await("JDK-8274165: the action of the menu item", 3000, () -> picked[0]);
+            return "the menu took the click on the second screen";
+        });
+        suite.auto("Popup across two screens", "JDK-8251862: a popup shown across the edge between the screens "
+                + "stays where it was asked, without jumping to the corner of a screen", () -> {
+            List<Screen> screens = requireScreens();
+            Screen a = screens.get(0), b = screens.get(1);
+            Stage s = testStage("Across", a);
+            awaitScale(s, a);
+            double edge = a.getBounds().getMaxX();
+            double y = Math.min(a.getVisualBounds().getMaxY(), b.getVisualBounds().getMaxY()) / 2;
+            javafx.stage.Popup popup = TestKit.fx(() -> {
+                javafx.stage.Popup p = new javafx.stage.Popup();
+                javafx.scene.shape.Rectangle r = new javafx.scene.shape.Rectangle(160, 80,
+                        javafx.scene.paint.Color.web("#0ea5e9"));
+                p.getContent().add(r);
+                p.setAutoFix(false);
+                p.show(s, edge - 80, y);
+                return p;
+            });
+            try {
+                TestKit.await("the popup", 3000, () -> popup.isShowing() && popup.getWidth() > 0);
+                TestKit.pause(400);
+                double x = TestKit.fx(popup::getX), py = TestKit.fx(popup::getY);
+                TestKit.check(Math.abs(x - (edge - 80)) < 2 && Math.abs(py - y) < 2, String.format(Locale.ROOT,
+                        "JDK-8251862: the popup asked at %.0f, %.0f is at %.0f, %.0f", edge - 80, y, x, py));
+                return String.format(Locale.ROOT, "at %.0f, %.0f, across x %.0f", x, py, edge);
+            } finally {
+                TestKit.fx(popup::hide);
+            }
+        });
+        suite.auto("Screens are never empty", "JDK-8252446: Screen.getScreens() and getPrimary() answer at once, "
+                + "a thousand times, while stages show and hide", () -> {
+            List<Screen> screens = requireScreens();
+            int[] empty = {0};
+            for (int i = 0; i < 10; i++) {
+                Stage s = testStage("Screens " + i, screens.get(i % screens.size()));
+                TestKit.fx(() -> {
+                    for (int k = 0; k < 100; k++) {
+                        if (Screen.getScreens().isEmpty() || Screen.getPrimary() == null) {
+                            empty[0]++;
+                        }
+                    }
+                    s.hide();
+                });
+            }
+            TestKit.check(empty[0] == 0, "JDK-8252446: no screens " + empty[0] + " times of 1000");
+            return "1000 times " + screens.size() + " screens";
         });
     }
 

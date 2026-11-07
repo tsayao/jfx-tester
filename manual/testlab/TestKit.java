@@ -103,7 +103,7 @@ final class TestKit {
     }
 
     enum Kind {
-        AUTO, ROBOT, MANUAL
+        AUTO, ROBOT, MANUAL, TOUCH
     }
 
     @FunctionalInterface
@@ -274,6 +274,15 @@ final class TestKit {
             return add(new Test(this, name, description, Kind.MANUAL, null));
         }
 
+        /**
+         * A test that passes as a manual test, by the events of a touch screen,
+         * and that a run performs with the touch screen of the robot when there
+         * is one (the touch robot of the GTK 4 glass, through libei).
+         */
+        Test touch(String name, String description, Step body) {
+            return add(new Test(this, name, description, Kind.TOUCH, body));
+        }
+
         private Test add(Test t) {
             tests.add(t);
             return t;
@@ -378,12 +387,15 @@ final class TestKit {
             int row = 0;
             for (Test t : tests) {
                 Node actions;
-                if (t.kind == Kind.MANUAL) {
+                if (t.kind == Kind.MANUAL || t.kind == Kind.TOUCH) {
                     Button ok = small("OK");
                     ok.setOnAction(e -> t.pass("Marked OK by hand"));
                     Button fail = small("FAIL");
                     fail.setOnAction(e -> t.fail("Marked FAIL by hand"));
                     actions = new HBox(4, ok, fail);
+                    if (t.kind == Kind.TOUCH) {
+                        ((HBox) actions).getChildren().addFirst(runOrStop(t));
+                    }
                 } else {
                     actions = runOrStop(t);
                 }
@@ -451,10 +463,22 @@ final class TestKit {
         /**
          * Runs the tests on the calling thread, which is not the FX thread.
          */
-        Result run(List<Test> selected) {
+        Result run(List<Test> tests) {
+            List<Test> selected = only(tests);
+            boolean own = beginRun(selected.size());
+            try {
+                return runSelected(selected);
+            } finally {
+                if (own) {
+                    endRun();
+                }
+            }
+        }
+
+        private Result runSelected(List<Test> selected) {
             fx(() -> {
                 for (Test t : selected) {
-                    if (t.kind != Kind.MANUAL || !isVerdict(t.status.get())) {
+                    if ((t.kind != Kind.MANUAL && t.kind != Kind.TOUCH) || !isVerdict(t.status.get())) {
                         t.set(Status.QUEUED, t.description);
                     }
                 }
@@ -499,28 +523,48 @@ final class TestKit {
                         t.set(Status.SKIP, "Not seen yet: " + t.description);
                     }
                 });
-                report(t);
+                finish(t);
                 return;
             }
-            if (t.kind == Kind.ROBOT && noRobotInput != null) {
+            if (t.kind == Kind.TOUCH && (!robotInput() || !touchAvailable())) {
+                fx(() -> {
+                    if (!isVerdict(t.status.get())) {
+                        t.set(Status.SKIP, robotInput()
+                                ? "No touch screen for the robot (the GTK 4 glass, libei and the compositor): "
+                                        + "touch it by hand"
+                                : "Not seen yet: " + t.description);
+                    }
+                });
+                finish(t);
+                return;
+            }
+            if ((t.kind == Kind.ROBOT || t.kind == Kind.TOUCH) && noRobotInput != null) {
                 fx(() -> t.set(Status.SKIP, "No robot input: " + noRobotInput));
-                report(t);
+                finish(t);
                 return;
             }
             if (t.kind == Kind.ROBOT && !robotInput()) {
                 fx(() -> t.set(Status.SKIP, "Robot tests turned off with -Dtests.robot=false"));
-                report(t);
+                finish(t);
                 return;
             }
             running = t;
-            if (t.kind == Kind.ROBOT) {
+            if (t.kind == Kind.ROBOT || t.kind == Kind.TOUCH) {
                 try {
                     openRobotSession();
                 } catch (UnsupportedOperationException e) {
                     // The desktop has no robot input: this and the next robot tests are skipped
                     noRobotInput = e.getMessage();
                     fx(() -> t.set(Status.SKIP, "No robot input: " + noRobotInput));
-                    report(t);
+                    finish(t);
+                    return;
+                } catch (RuntimeException e) {
+                    // A robot that breaks as it starts fails the test, and the run goes on
+                    e.printStackTrace(System.out);
+                    releaseInput();
+                    robotSessionOpen = false;
+                    fx(() -> t.set(Status.FAIL, "The robot did not start: " + e));
+                    finish(t);
                     return;
                 }
             }
@@ -528,6 +572,7 @@ final class TestKit {
                 showTabs(t);
                 t.set(Status.RUNNING, t.description);
             });
+            progress(t.suite.name + " / " + t.name);
             // The robot reads the frames on screen: let them catch up with the layout
             pause(300);
             long t0 = System.nanoTime();
@@ -552,7 +597,7 @@ final class TestKit {
                 status = Status.FAIL;
             } catch (UnsupportedOperationException e) {
                 // The desktop has no robot input: the next robot tests are skipped
-                if (t.kind == Kind.ROBOT) {
+                if (t.kind == Kind.ROBOT || t.kind == Kind.TOUCH) {
                     noRobotInput = e.getMessage();
                     detail = "No robot input: " + e.getMessage();
                     status = Status.SKIP;
@@ -564,7 +609,7 @@ final class TestKit {
                 detail = e.toString();
                 status = Status.FAIL;
             }
-            if (status == Status.FAIL && t.kind == Kind.ROBOT) {
+            if (status == Status.FAIL && (t.kind == Kind.ROBOT || t.kind == Kind.TOUCH)) {
                 releaseInput();
                 fx(afterRobotFailure);
             }
@@ -573,7 +618,7 @@ final class TestKit {
             String shown = (detail == null ? "" : detail) + " (" + ms + " ms)";
             Status s = status;
             fx(() -> t.set(s, shown));
-            report(t);
+            finish(t);
             pause(150);
         }
 
@@ -590,6 +635,100 @@ final class TestKit {
 
     private static boolean isVerdict(Status s) {
         return s == Status.OK || s == Status.FAIL;
+    }
+
+    /**
+     * The tests that -Dtests.only=NAME,... keeps, by name, without spaces and
+     * ignoring the case, or all of them.
+     */
+    static List<Test> only(List<Test> tests) {
+        String only = System.getProperty("tests.only");
+        if (only == null || only.isBlank()) {
+            return tests;
+        }
+        List<String> names = java.util.Arrays.stream(only.split(","))
+                .map(n -> n.replace(" ", "").toLowerCase(Locale.ROOT)).toList();
+        return tests.stream()
+                .filter(t -> names.contains(t.name.replace(" ", "").toLowerCase(Locale.ROOT))).toList();
+    }
+
+    // ---------------------------------------------------------------------
+    // The progress of a run, for the bars of jfx-tester
+
+    // The environment of jfx-tester, which shows a bar for it from the
+    // PROGRESS lines, in the format of its system tests
+    private static final String PROGRESS_ENV = System.getenv("JT_ENV");
+    private static boolean inRun;
+    private static int planned, done, passed, failed, skipped;
+    private static long runStart;
+
+    /**
+     * Starts counting a run of some tests, unless a run of all the labs
+     * already counts them, and tells whether it did.
+     */
+    static synchronized boolean beginRun(int tests) {
+        if (inRun) {
+            return false;
+        }
+        inRun = true;
+        planned = tests;
+        done = passed = failed = skipped = 0;
+        runStart = System.nanoTime();
+        progress("starting");
+        return true;
+    }
+
+    /**
+     * Ends the run: a stopped one ends with the tests that ran.
+     */
+    static synchronized void endRun() {
+        inRun = false;
+        planned = done;
+        progress(String.format(Locale.ROOT, "ended in %ds: %d OK, %d FAIL, %d SKIP",
+                (System.nanoTime() - runStart) / 1_000_000_000, passed, failed, skipped));
+    }
+
+    /**
+     * A line that tells jfx-tester what the lab does when no run goes on.
+     */
+    static void idle(String what) {
+        if (PROGRESS_ENV != null) {
+            System.out.println("PROGRESS " + PROGRESS_ENV + " [....................]   0% " + what);
+            System.out.flush();
+        }
+    }
+
+    private static synchronized void progress(String what) {
+        if (PROGRESS_ENV == null) {
+            return;
+        }
+        int width = 20;
+        int full = planned > 0 ? Math.min(width, done * width / planned) : 0;
+        int percent = planned > 0 ? Math.min(100, done * 100 / planned) : 0;
+        long elapsed = (System.nanoTime() - runStart) / 1_000_000_000;
+        long left = done > 0 && planned > done ? elapsed * (planned - done) / done : 0;
+        System.out.println(String.format(Locale.ROOT,
+                "PROGRESS %s [%s%s] %3d%% %d/%d tests, %d passed, %d failed, %d skipped, %dm%02ds left  %s",
+                PROGRESS_ENV, "#".repeat(full), ".".repeat(width - full), percent, done, planned, passed, failed,
+                skipped, left / 60, left % 60, what));
+        System.out.flush();
+    }
+
+    /**
+     * Reports a test that ran, or was skipped, in a run, and counts it.
+     */
+    private static void finish(Test t) {
+        report(t);
+        Status s = t.status.get();
+        synchronized (TestKit.class) {
+            done++;
+            switch (s) {
+                case OK -> passed++;
+                case FAIL -> failed++;
+                default -> skipped++;
+            }
+            progress(s.text + " " + t.suite.name + " / " + t.name);
+        }
     }
 
     private static void report(Test t) {
@@ -621,6 +760,7 @@ final class TestKit {
         }
         Label kind = new Label(switch (t.kind) {
             case ROBOT -> "robot";
+            case TOUCH -> "touch";
             default -> "manual";
         });
         kind.getStyleClass().add("test-kind");
@@ -962,6 +1102,71 @@ final class TestKit {
     }
 
     // ---------------------------------------------------------------------
+    // Touch input, through the touch robot of the GTK 4 glass of jfx-wayland
+
+    private static java.lang.reflect.Method touchMethod(String name, Class<?>... types) {
+        try {
+            return Class.forName("com.sun.glass.ui.gtk4.Gtk4TouchRobot").getMethod(name, types);
+        } catch (ReflectiveOperationException | LinkageError e) {
+            return null;
+        }
+    }
+
+    private static Object invokeTouch(String name, Class<?>[] types, Object... args) {
+        java.lang.reflect.Method m = touchMethod(name, types);
+        if (m == null) {
+            throw new Skipped("This glass has no touch robot");
+        }
+        return fx(() -> {
+            try {
+                return m.invoke(null, args);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw e.getCause() instanceof RuntimeException re ? re : new IllegalStateException(e.getCause());
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    private static Boolean touchAvailable;
+
+    /**
+     * Whether the robot can touch: the glass has a touch robot, and libei and
+     * the compositor support touch screens, which is known at run time.
+     */
+    static boolean touchAvailable() {
+        if (touchAvailable == null) {
+            try {
+                touchAvailable = Boolean.TRUE.equals(invokeTouch("isAvailable", new Class<?>[0]));
+            } catch (RuntimeException e) {
+                touchAvailable = false;
+            }
+        }
+        return touchAvailable;
+    }
+
+    static void touchDown(int id, Point2D p) {
+        invokeTouch("down", new Class<?>[] {int.class, double.class, double.class}, id, p.getX(), p.getY());
+    }
+
+    static void touchMove(int id, Point2D p) {
+        invokeTouch("move", new Class<?>[] {int.class, double.class, double.class}, id, p.getX(), p.getY());
+    }
+
+    static void touchUp(int id) {
+        invokeTouch("up", new Class<?>[] {int.class}, id);
+    }
+
+    /**
+     * Waits for a touch test to be passed or failed by the events the lab sees.
+     */
+    static String observed(Test t) {
+        await("the events of " + t.name, 4000, () -> isVerdict(t.status.get()));
+        check(t.status.get() == Status.OK, fx(() -> t.detail.get()));
+        return fx(() -> t.detail.get());
+    }
+
+    // ---------------------------------------------------------------------
     // Robot input
 
     static void move(Point2D p) {
@@ -984,6 +1189,18 @@ final class TestKit {
      * given modifiers from the press to the release.
      */
     static void drag(Point2D from, Point2D to, KeyCode... modifiers) {
+        dragPress(from, to, modifiers);
+        dragMove(from, to);
+        dragHover(to);
+        dragRelease(to, modifiers);
+    }
+
+    /**
+     * The start of a drag: hovers, presses at a point with the modifiers and
+     * moves a little toward another, slowly, so that the drag begins. The
+     * button stays down for dragMove, dragHover and dragRelease.
+     */
+    static void dragPress(Point2D from, Point2D to, KeyCode... modifiers) {
         TestRobot r = robot();
         // Hover first, so that the window has the pointer when the button goes down
         move(from.add(-2, 0));
@@ -1005,6 +1222,13 @@ final class TestKit {
             move(from.add(dx * 3 * i, dy * 3 * i));
             pause(120);
         }
+    }
+
+    /**
+     * Moves from a point to another in steps, as a drag does with the button
+     * down.
+     */
+    static void dragMove(Point2D from, Point2D to) {
         int steps = 24;
         for (int i = 1; i <= steps; i++) {
             double t = (double) i / steps;
@@ -1013,12 +1237,25 @@ final class TestKit {
             move(p);
             pause(25);
         }
+    }
+
+    /**
+     * Wiggles over a point during a drag.
+     */
+    static void dragHover(Point2D to) {
         // Hover over the target, so that it accepts the drop before the release:
         // the compositor cancels a drop that the target has not accepted yet
         for (int i = 0; i < 10; i++) {
             move(to.add(i % 2, 0));
             pause(80);
         }
+    }
+
+    /**
+     * Releases the button and the modifiers of dragPress at a point.
+     */
+    static void dragRelease(Point2D to, KeyCode... modifiers) {
+        TestRobot r = robot();
         fx(() -> {
             r.mouseRelease(MouseButton.PRIMARY);
             for (KeyCode k : modifiers) {

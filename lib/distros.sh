@@ -220,6 +220,68 @@ packages_session() {
     esac
 }
 
+# What the GTK 4 glass of jfx-wayland needs (--wayland): GTK 4 and libadwaita,
+# Vulkan and GBM for its Prism pipelines, and the tools of its labs, wl-copy
+# and wl-paste of the clipboard and the AT-SPI bindings of the accessibility
+packages_wayland() {
+    case "$(family "$1")" in
+        fedora|rhel) echo gtk4 libadwaita vulkan-loader mesa-vulkan-drivers mesa-libgbm wl-clipboard \
+            python3-gobject at-spi2-core google-noto-color-emoji-fonts ;;
+        ubuntu) echo libgtk-4-1 libadwaita-1-0 libvulkan1 mesa-vulkan-drivers libgbm1 wl-clipboard \
+            python3-gi gir1.2-atspi-2.0 at-spi2-core fonts-noto-color-emoji ;;
+        arch) echo gtk4 libadwaita vulkan-icd-loader vulkan-radeon vulkan-intel mesa wl-clipboard \
+            python-gobject at-spi2-core noto-fonts-emoji ;;
+    esac
+}
+
+# An input method framework of --ime: its daemon, its modules of GTK 3 and,
+# with the GTK 4 glass (--wayland), of GTK 4, and Hangul, which the lab
+# composes with on fcitx5
+packages_ime() {
+    case "$(family "$1"):$2" in
+        fedora:ibus|rhel:ibus) printf '%s ' ibus ibus-gtk3 ibus-hangul; [ -n "$3" ] && printf '%s ' ibus-gtk4 ;;
+        ubuntu:ibus) printf '%s ' ibus ibus-gtk3 ibus-hangul; [ -n "$3" ] && printf '%s ' ibus-gtk4 ;;
+        arch:ibus) printf '%s ' ibus ibus-hangul ;;
+        fedora:fcitx5|rhel:fcitx5) printf '%s ' fcitx5 fcitx5-gtk3 fcitx5-hangul
+            [ -n "$3" ] && printf '%s ' fcitx5-gtk4 ;;
+        ubuntu:fcitx5) printf '%s ' fcitx5 fcitx5-frontend-gtk3 fcitx5-hangul
+            [ -n "$3" ] && printf '%s ' fcitx5-frontend-gtk4 ;;
+        arch:fcitx5) printf '%s ' fcitx5 fcitx5-gtk fcitx5-hangul ;;
+    esac
+    echo
+}
+
+# The engines of the languages of the ime lab, Chinese (Pinyin), Japanese
+# (Anthy or Mozc) and Arabic (m17n), and their fonts, which not every release
+# has
+packages_ime_optional() {
+    case "$(family "$1"):$2" in
+        fedora:ibus|rhel:ibus) echo ibus-libpinyin ibus-anthy ibus-mozc ibus-m17n m17n-db \
+            google-noto-sans-cjk-fonts google-noto-sans-arabic-fonts ;;
+        ubuntu:ibus) echo ibus-libpinyin ibus-anthy ibus-mozc ibus-m17n fonts-noto-cjk fonts-noto-core ;;
+        arch:ibus) echo ibus-libpinyin ibus-anthy noto-fonts-cjk noto-fonts ;;
+        fedora:fcitx5|rhel:fcitx5) echo fcitx5-chinese-addons fcitx5-anthy fcitx5-mozc fcitx5-m17n \
+            google-noto-sans-cjk-fonts google-noto-sans-arabic-fonts ;;
+        ubuntu:fcitx5) echo fcitx5-chinese-addons fcitx5-anthy fcitx5-mozc fcitx5-m17n fonts-noto-cjk \
+            fonts-noto-core ;;
+        arch:fcitx5) echo fcitx5-chinese-addons fcitx5-anthy fcitx5-mozc fcitx5-m17n noto-fonts-cjk noto-fonts ;;
+    esac
+}
+
+# The labs of manual/testlab, each an application of its own, as
+# NAME:FILE.java, which --tests takes by NAME
+LABS="robot:RobotLab.java windows:WindowsLab.java screens:ScreensLab.java stage:StageLab.java \
+dialogs:DialogsLab.java dnd:DragDropLab.java clipboard:ClipboardLab.java render:RenderLab.java \
+3d:Scene3DLab.java swing:SwingLab.java touch:TouchLab.java ime:ImeLab.java scale:ScaleLab.java crash:CrashLab.java a11y:AccessibilityLab.java"
+
+# The file of a lab, by its name, or nothing
+lab_file() {
+    for l in $LABS; do
+        [ "${l%%:*}" = "$1" ] && { echo "${l#*:}"; return 0; }
+    done
+    return 1
+}
+
 # The library of --robot=libei
 packages_libei() {
     case "$(family "$1")" in

@@ -315,6 +315,9 @@ idle-delay=uint32 0
 [org/gnome/desktop/notifications]
 show-banners=false
 
+[org/gnome/desktop/sound]
+event-sounds=false
+
 [org/gnome/desktop/screensaver]
 idle-activation-enabled=false
 lock-enabled=false
@@ -337,6 +340,7 @@ EOF
     done
     unset_display=1
     configure=1
+    nested=
     if [ -z "$JT_HEADLESS" ] && has devkit && [ -z "$devkit" ]; then
         echo "The viewer of the nested shell (mutter-devkit) is not installed: running headless" >&2
         JT_HEADLESS=1
@@ -389,6 +393,7 @@ EOF
         export MUTTER_DEBUG_DUMMY_MODE_SPECS=$sizes MUTTER_DEBUG_NUM_DUMMY_MONITORS=$(monitor_count) \
             MUTTER_DEBUG_DUMMY_MONITOR_SCALES=$scales
         set -- --nested
+        nested=1
         unset_display=
         all_same size && configure=
     fi
@@ -401,22 +406,30 @@ EOF
         sleep 0.2
     done
     shell_eval "Main.overview.hide()" > /dev/null
-    # A keyboard and a pointer on the seat, which has none, before Xwayland starts:
-    # without them, the first key of the robot of each test is lost
-    (exec python3 -u "$(dirname "$0")/seat-devices.py") > "$JT_LOGS/seat-devices.log" 2>&1 &
-    CHILDREN="$CHILDREN $!"
+    # A keyboard and a pointer on the seat of a headless or devkit shell, which
+    # has none, before Xwayland starts: without them, the first key of the robot
+    # of each test is lost. A nested shell, an X client of the host, has the
+    # devices of the host, and its virtual devices are XTest of the X server of
+    # the host, whose Xwayland asks the remote desktop portal of the host for
+    # them: a dialog on the desktop of the host
+    if [ -z "$nested" ]; then
+        (exec python3 -u "$(dirname "$0")/seat-devices.py") > "$JT_LOGS/seat-devices.log" 2>&1 &
+        CHILDREN="$CHILDREN $!"
+    fi
     [ -n "$configure" ] && configure_gnome_monitors
     sleep 1
     # Its session shows the indicator of screen sharing in the panel for as long
     # as it lasts: the indicator forgets it, and shows for the sessions of the
     # robots only
-    for i in $(seq 1 50); do
-        grep -q "^seat devices created" "$JT_LOGS/seat-devices.log" 2>/dev/null && break
-        grep -q "^no seat devices" "$JT_LOGS/seat-devices.log" 2>/dev/null && break
-        sleep 0.1
-    done
-    shell_eval "{ const i = Main.panel.statusArea.screenSharing;
-        if (i?._handles) { i._handles.clear(); i._sync(); i.hide(); } }" > /dev/null
+    if [ -z "$nested" ]; then
+        for i in $(seq 1 50); do
+            grep -q "^seat devices created" "$JT_LOGS/seat-devices.log" 2>/dev/null && break
+            grep -q "^no seat devices" "$JT_LOGS/seat-devices.log" 2>/dev/null && break
+            sleep 0.1
+        done
+        shell_eval "{ const i = Main.panel.statusArea.screenSharing;
+            if (i?._handles) { i._handles.clear(); i._sync(); i.hide(); } }" > /dev/null
+    fi
 
     export XDG_CURRENT_DESKTOP=GNOME
     # The Xwayland of the shell, started when the first X client connects
@@ -828,6 +841,12 @@ idle-activation-enabled=false
 
 [org/cinnamon/desktop/notifications]
 display-notifications=false
+
+[org/cinnamon/desktop/sound]
+event-sounds=false
+
+[org/gnome/desktop/sound]
+event-sounds=false
 EOF
     x11_scale
     if [ -n "$X11_INT_SCALE" ]; then
@@ -1110,14 +1129,47 @@ allprojects {
 }
 EOF
 
-if [ -n "$JT_MANUAL" ]; then
-    echo "Running $JT_MANUAL on $JT_DESKTOP (DISPLAY=$DISPLAY): close it to end the session${JT_TIMEOUT:+, or it ends after $JT_TIMEOUT s}"
-    # From its directory, as the manual tests read their resources from there
-    cd "$(dirname "$JT_MANUAL")" || exit 1
-    case "$JT_MANUAL" in
-        *.jar) set -- -jar "$JT_MANUAL" "$@" ;;
-        *) set -- "$JT_MANUAL" "$@" ;;
+# The input method framework of --ime, with the engines of the languages of
+# the ime lab, for the tests, which get its modules of GTK by GTK_IM_MODULE
+start_ime() {
+    case "$JT_IME" in
+        ibus)
+            # ibus-hangul in Hangul mode from the start
+            printf '\n[org/freedesktop/ibus/engine/hangul]\ninitial-input-mode=%s\n' "'hangul'" \
+                >> "$XDG_CONFIG_HOME/glib-2.0/settings/keyfile"
+            (exec ibus-daemon --replace --xim --panel=disable) > "$JT_LOGS/ibus.log" 2>&1 &
+            CHILDREN="$CHILDREN $!"
+            i=0
+            until ibus engine > /dev/null 2>&1 || [ $i -ge 50 ]; do sleep 0.2; i=$((i + 1)); done
+            ibus engine xkb:us::eng >> "$JT_LOGS/ibus.log" 2>&1
+            echo "IBus $(ibus version 2>/dev/null | sed 's/[^0-9.]//g'), engines: $(ibus list-engine --name-only 2>/dev/null \
+                | grep -E 'pinyin|anthy|mozc|hangul|ar:kbd|ara' | tr '\n' ' ')"
+            export GTK_IM_MODULE=ibus XMODIFIERS=@im=ibus QT_IM_MODULE=ibus ;;
+        fcitx5)
+            # A group with the engines of the lab, which fcitx5-remote switches between
+            mkdir -p "$XDG_CONFIG_HOME/fcitx5"
+            {
+                printf '[Groups/0]\nName=Default\nDefault Layout=us\nDefaultIM=keyboard-us\n\n'
+                n=0
+                for im in keyboard-us hangul pinyin anthy mozc m17n_ar_kbd keyboard-ara; do
+                    printf '[Groups/0/Items/%d]\nName=%s\nLayout=\n\n' $n $im
+                    n=$((n + 1))
+                done
+                printf '[GroupOrder]\n0=Default\n'
+            } > "$XDG_CONFIG_HOME/fcitx5/profile"
+            (exec fcitx5 --replace --disable=notificationitem,kimpanel) > "$JT_LOGS/fcitx5.log" 2>&1 &
+            CHILDREN="$CHILDREN $!"
+            i=0
+            until fcitx5-remote > /dev/null 2>&1 || [ $i -ge 50 ]; do sleep 0.2; i=$((i + 1)); done
+            echo "fcitx5 $(fcitx5 --version 2>/dev/null | sed 's/[^0-9.]//g'), engines: $(ls /usr/share/fcitx5/inputmethod 2>/dev/null \
+                | sed 's/\.conf$//' | tr '\n' ' ')"
+            export GTK_IM_MODULE=fcitx XMODIFIERS=@im=fcitx QT_IM_MODULE=fcitx ;;
     esac
+    dbus-update-activation-environment GTK_IM_MODULE XMODIFIERS QT_IM_MODULE > /dev/null 2>&1
+}
+[ -n "$JT_IME" ] && start_ime
+
+if [ -n "$JT_MANUAL" ]; then
     # The options of the SDK, as build/run.args has them for the one built
     args=$JT_WORKSPACE/build/run.args
     if [ -n "$JT_SDK" ]; then
@@ -1136,19 +1188,73 @@ if [ -n "$JT_MANUAL" ]; then
         printf -- '--upgrade-module-path="%s"\n--add-modules=%s\n--enable-native-access=%s\n' \
             "$JT_SDK/lib" "$modules" "$access" > "$args"
     fi
-    # Ended after JT_TIMEOUT, which is no failure of the test. Its user.home is
-    # JT_HOME, as for the system tests: the robot keeps its tokens there, for
-    # the portals of this distribution and desktop, and not in the home of the
-    # host, which all of them would share. JT_JVM_ARGS can give another
-    set -- "$JAVA_HOME/bin/java" @"$args" -Duser.home="$JT_HOME" $JT_JVM_ARGS "$@"
-    [ -n "$JT_TIMEOUT" ] && set -- timeout "$JT_TIMEOUT" "$@"
-    { "$@"; status=$?
-      if [ -n "$JT_TIMEOUT" ] && [ "$status" = 124 ]; then
-          echo "Ended the manual test after $JT_TIMEOUT s (--timeout)"
-          status=0
-      fi
-      echo "$status" > "$JT_LOGS/manual.status"; } 2>&1 | tee "$JT_LOGS/manual.log"
-    exit "$(cat "$JT_LOGS/manual.status" 2>/dev/null || echo 1)"
+    # The GTK 4 glass of jfx-wayland, on the class path, with the internals of
+    # JavaFX it uses, and its pipelines; in GNOME it asks the shell to place its
+    # windows, as the tests of positions need
+    wayland_args=
+    if [ -n "$JT_WAYLAND" ]; then
+        wayland_args="-cp $JT_WAYLAND --enable-native-access=javafx.graphics,ALL-UNNAMED"
+        for e in javafx.base/com.sun.javafx javafx.base/com.sun.javafx.logging \
+                javafx.graphics/com.sun.glass.events javafx.graphics/com.sun.glass.ui \
+                javafx.graphics/com.sun.glass.ui.delegate javafx.graphics/com.sun.javafx.application.preferences \
+                javafx.graphics/com.sun.javafx.geom javafx.graphics/com.sun.javafx.geom.transform \
+                javafx.graphics/com.sun.javafx.sg.prism javafx.graphics/com.sun.javafx.tk \
+                javafx.graphics/com.sun.prism javafx.graphics/com.sun.prism.impl \
+                javafx.graphics/com.sun.prism.impl.ps javafx.graphics/com.sun.prism.paint \
+                javafx.graphics/com.sun.prism.ps javafx.graphics/com.sun.prism.shader; do
+            wayland_args="$wayland_args --add-exports=$e=ALL-UNNAMED"
+        done
+        wayland_args="$wayland_args -Dglass.platform=Gtk4 -Dprism.order=vk,gl,sw"
+        [ "$JT_DESKTOP" = gnome ] && wayland_args="$wayland_args -Dglass.gtk4.testSession=gnome"
+    fi
+    # Runs a manual test, a .java or a .jar, with its log, and writes its
+    # status. Ended after JT_TIMEOUT, which is no failure of the test. Its
+    # user.home is JT_HOME, as for the system tests: the robot keeps its tokens
+    # there, for the portals of this distribution and desktop, and not in the
+    # home of the host, which all of them would share. JT_JVM_ARGS can give
+    # another
+    run_test() {
+        test_file=$1 log=$2 status_file=$3
+        shift 3
+        case "$test_file" in
+            *.jar) set -- -jar "$test_file" "$@" ;;
+            *) set -- "$test_file" "$@" ;;
+        esac
+        set -- "$JAVA_HOME/bin/java" @"$args" $wayland_args ${JT_IME:+-Dtests.ime=$JT_IME} -Duser.home="$JT_HOME" \
+            $JT_JVM_ARGS "$@"
+        [ -n "$JT_TIMEOUT" ] && set -- timeout "$JT_TIMEOUT" "$@"
+        { "$@"; status=$?
+          if [ -n "$JT_TIMEOUT" ] && [ "$status" = 124 ]; then
+              echo "Ended the manual test after $JT_TIMEOUT s (--timeout)"
+              status=0
+          fi
+          echo "$status" > "$status_file"; } 2>&1 | tee "$log"
+        return "$(cat "$status_file" 2>/dev/null || echo 1)"
+    }
+    # From its directory, as the manual tests read their resources from there
+    cd "$(dirname "$JT_MANUAL")" || exit 1
+    if [ -n "$JT_LABS" ]; then
+        # The labs of --tests, each an application of its own, one after the
+        # other, with a log each; manual.log has them all
+        : > "$JT_LOGS/manual.log"
+        : > "$JT_LOGS/labs.failed"
+        failed=0
+        for lab in $JT_LABS; do
+            name=${lab%%:*}
+            echo "Running the lab $name (${lab#*:}) on $JT_DESKTOP (DISPLAY=$DISPLAY${JT_WAYLAND:+, WAYLAND_DISPLAY=$WAYLAND_DISPLAY with the GTK 4 glass})" \
+                | tee -a "$JT_LOGS/manual.log"
+            if ! run_test "${lab#*:}" "$JT_LOGS/lab-$name.log" "$JT_LOGS/lab-$name.status" "$@"; then
+                failed=1
+                printf '%s ' "$name" >> "$JT_LOGS/labs.failed"
+            fi
+            cat "$JT_LOGS/lab-$name.log" >> "$JT_LOGS/manual.log"
+        done
+        echo "$failed" > "$JT_LOGS/manual.status"
+        exit "$failed"
+    fi
+    echo "Running $JT_MANUAL on $JT_DESKTOP (DISPLAY=$DISPLAY${JT_WAYLAND:+, WAYLAND_DISPLAY=$WAYLAND_DISPLAY with the GTK 4 glass}): close it to end the session${JT_TIMEOUT:+, or it ends after $JT_TIMEOUT s}"
+    run_test "$JT_MANUAL" "$JT_LOGS/manual.log" "$JT_LOGS/manual.status" "$@"
+    exit $?
 fi
 
 echo "Running the system tests on $JT_DESKTOP (DISPLAY=$DISPLAY), logs in $JT_LOGS"

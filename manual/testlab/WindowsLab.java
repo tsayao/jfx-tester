@@ -101,6 +101,15 @@ import java.util.function.Supplier;
  */
 public class WindowsLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java WindowsLab.java</pre>
+     * or {@code ./jfx-tester --tests=windows}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("windows", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS;
 
     static final String STYLESHEET = "data:text/css;base64,"
@@ -713,6 +722,282 @@ public class WindowsLab {
                 this::nestedLoopsTest);
         suite.auto("showAndWait", "Modal stages shown with showAndWait() inside one another return in order "
                 + "(ShowAndWaitTest)", this::showAndWaitTest);
+        defineJbsTests();
+    }
+
+    // ---------------------------------------------------------------------
+    // The window bugs of the JBS on Linux, so that they do not come back
+
+    private void defineJbsTests() {
+        suite.auto("Maximized owner, new stage", "JDK-8332222, JDK-8325549, JDK-8319089: a stage and a dialog "
+                + "opened over a maximized stage leave it maximized, at its size", this::maximizedOwnerTest);
+        suite.auto("New stage keeps its size", "JDK-8328160: a stage opened from another, with its width and height "
+                + "set, shows at that size", this::newStageSizeTest);
+        suite.auto("Resizable alert", "JDK-8324684: a resizable alert shows at least at the size of its content",
+                this::resizableAlertTest);
+        suite.auto("Undecorated maximized", "JDK-8237491: an undecorated stage maximizes to the work area",
+                this::undecoratedMaximizedTest);
+        suite.auto("Owned stage in full screen", "JDK-8248435: a stage owned by a stage in full screen goes full "
+                + "screen too", this::ownedFullScreenTest);
+        suite.auto("Position at show", "JDK-8212060, JDK-8089784: a stage placed before show is there when shown, "
+                + "and not first at the top left", this::positionAtShowTest);
+        suite.auto("Position after full screen", "JDK-8173901: leaving full screen puts the stage back where it was",
+                this::positionAfterFullScreenTest);
+        suite.robot("Text field of new stages", "JDK-8319317: five new stages in turn each give their text field "
+                + "the focus and the keys", this::newStagesTypingTest);
+        suite.auto("Transparent stage, width only", "JDK-8344372: a TRANSPARENT stage given a width and no height "
+                + "shows at that width, with the height of its scene", this::transparentWidthTest);
+        suite.auto("Maximized within the screen", "JDK-8285983: a maximized stage does not exceed the bounds of its "
+                + "screen", this::maximizedWithinScreenTest);
+    }
+
+    private Stage showTestStage(StageStyle style, String title, Consumer<Stage> setup) {
+        Stage s = fx(() -> {
+            Stage stage = testStage(style, title);
+            setup.accept(stage);
+            stage.show();
+            return stage;
+        });
+        await(title + " shown", 5000, () -> s.isShowing() && s.getScene().getWidth() > 0);
+        TestKit.pause(300);
+        return s;
+    }
+
+    private String maximizedOwnerTest() {
+        Stage owner = showTestStage(StageStyle.DECORATED, "Maximized owner", s -> s.setMaximized(true));
+        await("the owner maximized", 5000, () -> owner.isMaximized()
+                && owner.getScene().getWidth() > visualBounds().getWidth() * 0.9);
+        TestKit.pause(500);
+        double w = fx(() -> owner.getScene().getWidth()), h = fx(() -> owner.getScene().getHeight());
+        Stage other = showTestStage(StageStyle.DECORATED, "Another stage", s -> s.initOwner(owner));
+        TestKit.pause(500);
+        check(fx(() -> owner.isMaximized()), "JDK-8332222: the owner is no longer maximized after a new stage");
+        check(fx(() -> near(owner.getScene().getWidth(), w, 1) && near(owner.getScene().getHeight(), h, 1)),
+                String.format(Locale.ROOT, "JDK-8332222: the owner shrank from %.0f × %.0f to %.0f × %.0f", w, h,
+                        fx(() -> owner.getScene().getWidth()), fx(() -> owner.getScene().getHeight())));
+        fx(() -> other.hide());
+        javafx.scene.control.Alert[] alert = new javafx.scene.control.Alert[1];
+        fx(() -> {
+            alert[0] = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.INFORMATION, "Dialog");
+            alert[0].initOwner(owner);
+            alert[0].initModality(Modality.NONE);
+            alert[0].show();
+        });
+        try {
+            await("the dialog", 5000, () -> alert[0].isShowing());
+            TestKit.pause(600);
+            check(fx(() -> owner.isMaximized()), "JDK-8319089: the owner is no longer maximized after a dialog");
+            check(fx(() -> near(owner.getScene().getWidth(), w, 1) && near(owner.getScene().getHeight(), h, 1)),
+                    String.format(Locale.ROOT, "JDK-8325549: the owner was resized from %.0f × %.0f to %.0f × %.0f "
+                            + "by a dialog", w, h, fx(() -> owner.getScene().getWidth()),
+                            fx(() -> owner.getScene().getHeight())));
+        } finally {
+            fx(() -> alert[0].close());
+        }
+        return String.format(Locale.ROOT, "maximized at %.0f × %.0f through a stage and a dialog", w, h);
+    }
+
+    private String newStageSizeTest() {
+        Stage first = showTestStage(StageStyle.DECORATED, "First", s -> { });
+        Stage second = fx(() -> {
+            Stage s = new Stage();
+            s.initOwner(first);
+            s.setScene(new Scene(new StackPane(new Label("Second")), 100, 80));
+            s.setWidth(520);
+            s.setHeight(380);
+            testStages.add(s);
+            s.show();
+            return s;
+        });
+        await("the second stage", 5000, () -> second.isShowing() && second.getScene().getWidth() > 0);
+        TestKit.pause(500);
+        double w = fx(() -> second.getWidth()), h = fx(() -> second.getHeight());
+        check(near(w, 520, 2) && near(h, 380, 2), String.format(Locale.ROOT, "JDK-8328160: the stage is %.0f × "
+                + "%.0f, not 520 × 380", w, h));
+        double sw = fx(() -> second.getScene().getWidth()), sh = fx(() -> second.getScene().getHeight());
+        check(sw > 400 && sh > 250, String.format(Locale.ROOT, "the scene is %.0f × %.0f in a stage of 520 × 380",
+                sw, sh));
+        return String.format(Locale.ROOT, "520 × 380, scene %.0f × %.0f", sw, sh);
+    }
+
+    private String resizableAlertTest() {
+        javafx.scene.control.Alert[] alert = new javafx.scene.control.Alert[1];
+        fx(() -> {
+            alert[0] = new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.CONFIRMATION,
+                    "A resizable alert with a long message that needs room to show itself fully, "
+                            + "on two lines or more if the dialog is narrow.");
+            alert[0].setResizable(true);
+            alert[0].initModality(Modality.NONE);
+            alert[0].show();
+        });
+        try {
+            await("the alert", 5000, () -> alert[0].isShowing() && alert[0].getDialogPane().getHeight() > 0);
+            TestKit.pause(600);
+            double[] size = fx(() -> {
+                javafx.scene.control.DialogPane pane = alert[0].getDialogPane();
+                return new double[] {pane.getWidth(), pane.getHeight(), pane.prefWidth(-1),
+                        pane.prefHeight(pane.getWidth())};
+            });
+            check(size[0] >= size[2] - 2 && size[1] >= size[3] - 2, String.format(Locale.ROOT, "JDK-8324684: the "
+                    + "alert is %.0f × %.0f, smaller than its content, %.0f × %.0f", size[0], size[1], size[2],
+                    size[3]));
+            return String.format(Locale.ROOT, "%.0f × %.0f for a content of %.0f × %.0f", size[0], size[1], size[2],
+                    size[3]);
+        } finally {
+            fx(() -> alert[0].close());
+        }
+    }
+
+    private String undecoratedMaximizedTest() {
+        Stage s = showTestStage(StageStyle.UNDECORATED, "Undecorated", st -> { });
+        fx(() -> s.setMaximized(true));
+        Rectangle2D area = visualBounds();
+        try {
+            await("maximized to the work area", 5000, () -> s.isMaximized()
+                    && s.getScene().getWidth() > area.getWidth() * 0.95
+                    && s.getScene().getHeight() > area.getHeight() * 0.9);
+        } catch (AssertionError e) {
+            throw new AssertionError(String.format(Locale.ROOT, "JDK-8237491: the undecorated stage is %.0f × %.0f, "
+                    + "maximized %b, in a work area of %.0f × %.0f", fx(() -> s.getScene().getWidth()),
+                    fx(() -> s.getScene().getHeight()), fx(() -> s.isMaximized()), area.getWidth(),
+                    area.getHeight()));
+        }
+        return String.format(Locale.ROOT, "%.0f × %.0f", fx(() -> s.getScene().getWidth()),
+                fx(() -> s.getScene().getHeight()));
+    }
+
+    private String ownedFullScreenTest() {
+        Rectangle2D screen = screen();
+        Stage owner = showTestStage(StageStyle.DECORATED, "Owner in full screen", s -> s.setFullScreen(true));
+        await("the owner in full screen", 5000, () -> owner.isFullScreen()
+                && near(owner.getScene().getWidth(), screen.getWidth(), 2));
+        TestKit.pause(400);
+        Stage child = showTestStage(StageStyle.DECORATED, "Owned", s -> s.initOwner(owner));
+        fx(() -> child.setFullScreen(true));
+        try {
+            await("the owned stage in full screen", 5000, () -> child.isFullScreen()
+                    && near(child.getScene().getWidth(), screen.getWidth(), 2)
+                    && near(child.getScene().getHeight(), screen.getHeight(), 2));
+        } catch (AssertionError e) {
+            throw new AssertionError(String.format(Locale.ROOT, "JDK-8248435: the owned stage is %.0f × %.0f, "
+                    + "fullScreen %b, on a screen of %.0f × %.0f", fx(() -> child.getScene().getWidth()),
+                    fx(() -> child.getScene().getHeight()), fx(() -> child.isFullScreen()), screen.getWidth(),
+                    screen.getHeight()));
+        }
+        return "both in full screen";
+    }
+
+    private String positionAtShowTest() {
+        Rectangle2D area = visualBounds();
+        double x = area.getMinX() + 180, y = area.getMinY() + 140;
+        Point2D[] atShown = {null};
+        Stage s = fx(() -> {
+            Stage stage = testStage(StageStyle.DECORATED, "Placed");
+            stage.setX(x);
+            stage.setY(y);
+            stage.setOnShown(e -> atShown[0] = new Point2D(stage.getX(), stage.getY()));
+            stage.show();
+            return stage;
+        });
+        await("the stage shown", 5000, () -> s.isShowing() && atShown[0] != null);
+        TestKit.pause(800);
+        Point2D now = fx(() -> new Point2D(s.getX(), s.getY()));
+        check(atShown[0].distance(x, y) < 2, "JDK-8212060: at WINDOW_SHOWN the stage is at " + TestKit.fmt(atShown[0])
+                + ", not " + TestKit.fmt(new Point2D(x, y)));
+        check(now.distance(x, y) < 2, "JDK-8089784: the stage is at " + TestKit.fmt(now) + ", not "
+                + TestKit.fmt(new Point2D(x, y)));
+        // And on the screen: the stage, raised, covers its point, not the top left of the work area
+        fx(() -> s.toFront());
+        TestKit.pause(400);
+        Color seen = fx(() -> TestKit.robot().getPixelColor(s.getScene().getRoot().localToScreen(10, 10)));
+        check(near(seen.getRed(), 0x1e / 255.0, 0.08) && near(seen.getBlue(), 0x3b / 255.0, 0.08),
+                "the stage is not drawn at its position: " + seen);
+        return "at " + TestKit.fmt(now) + " from WINDOW_SHOWN on";
+    }
+
+    private String positionAfterFullScreenTest() {
+        Rectangle2D area = visualBounds();
+        double x = area.getMinX() + 220, y = area.getMinY() + 160;
+        Stage s = showTestStage(StageStyle.DECORATED, "Back in place", st -> {
+            st.setX(x);
+            st.setY(y);
+        });
+        await("the stage in place", 3000, () -> near(s.getX(), x, 2) && near(s.getY(), y, 2));
+        fx(() -> s.setFullScreen(true));
+        await("full screen", 5000, () -> s.isFullScreen() && s.getScene().getWidth() > area.getWidth() * 0.9);
+        TestKit.pause(400);
+        fx(() -> s.setFullScreen(false));
+        try {
+            await("the stage back in place", 5000, () -> !s.isFullScreen() && near(s.getX(), x, 2)
+                    && near(s.getY(), y, 2));
+        } catch (AssertionError e) {
+            throw new AssertionError("JDK-8173901: after full screen the stage is at " + fx(() -> TestKit.fmt(
+                    new Point2D(s.getX(), s.getY()))) + ", not " + TestKit.fmt(new Point2D(x, y)));
+        }
+        return "back at " + TestKit.fmt(new Point2D(x, y));
+    }
+
+    private String newStagesTypingTest() {
+        List<String> wrong = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) {
+            javafx.scene.control.TextField field = fx(() -> new javafx.scene.control.TextField());
+            Stage s = fx(() -> {
+                Stage stage = new Stage();
+                stage.setTitle("Typing");
+                stage.setScene(new Scene(new StackPane(field), 300, 120));
+                testStages.add(stage);
+                stage.show();
+                return stage;
+            });
+            await("the stage " + i + " focused", 5000, () -> s.isFocused() && field.isFocused());
+            TestKit.pause(300);
+            TestKit.type("abc" + i);
+            int n = i;
+            try {
+                await("the keys in the field of stage " + n, 2000, () -> field.getText().equals("abc" + n));
+            } catch (AssertionError e) {
+                wrong.add("stage " + i + ": \"" + fx(() -> field.getText()) + "\"");
+            }
+            fx(() -> s.hide());
+            TestKit.pause(200);
+        }
+        check(wrong.isEmpty(), "JDK-8319317: the keys did not reach the field: " + wrong);
+        return "5 stages took the keys";
+    }
+
+    private String transparentWidthTest() {
+        Stage s = fx(() -> {
+            Stage stage = new Stage(StageStyle.TRANSPARENT);
+            StackPane root = new StackPane(new Label("Transparent"));
+            root.setStyle("-fx-background-color: rgba(30, 41, 59, 0.8);");
+            Scene scene = new Scene(root, 200, 150);
+            scene.setFill(Color.TRANSPARENT);
+            stage.setScene(scene);
+            stage.setWidth(400);
+            testStages.add(stage);
+            stage.show();
+            return stage;
+        });
+        await("the transparent stage", 5000, () -> s.isShowing() && s.getScene().getWidth() > 0);
+        TestKit.pause(400);
+        double w = fx(() -> s.getWidth()), h = fx(() -> s.getHeight());
+        check(near(w, 400, 2) && h > 100, String.format(Locale.ROOT, "JDK-8344372: the stage is %.0f × %.0f, not "
+                + "400 × 150", w, h));
+        return String.format(Locale.ROOT, "%.0f × %.0f", w, h);
+    }
+
+    private String maximizedWithinScreenTest() {
+        Stage s = showTestStage(StageStyle.DECORATED, "Within the screen", st -> st.setMaximized(true));
+        await("maximized", 5000, () -> s.isMaximized() && s.getScene().getWidth() > visualBounds().getWidth() * 0.9);
+        TestKit.pause(500);
+        Rectangle2D screen = screen();
+        double[] b = fx(() -> new double[] {s.getX(), s.getY(), s.getWidth(), s.getHeight()});
+        check(b[0] >= screen.getMinX() - 1 && b[1] >= screen.getMinY() - 1 && b[0] + b[2] <= screen.getMaxX() + 1
+                && b[1] + b[3] <= screen.getMaxY() + 1, String.format(Locale.ROOT, "JDK-8285983: the maximized stage "
+                + "is %.0f, %.0f, %.0f × %.0f, beyond the screen of %.0f × %.0f", b[0], b[1], b[2], b[3],
+                screen.getWidth(), screen.getHeight()));
+        return String.format(Locale.ROOT, "%.0f × %.0f within %.0f × %.0f", b[2], b[3], screen.getWidth(),
+                screen.getHeight());
     }
 
     private Rectangle2D screen() {

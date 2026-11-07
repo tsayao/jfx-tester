@@ -91,6 +91,15 @@ import java.util.function.Supplier;
  */
 public class SwingLab {
 
+    /**
+     * Runs this lab as an application of its own, with its tests:
+     * <pre>java SwingLab.java</pre>
+     * or {@code ./jfx-tester --tests=swing}.
+     */
+    public static void main(String[] args) {
+        TestLab.launchLab("swing", args);
+    }
+
     private static final String CSS = TestKit.BASE_CSS;
 
     static final String STYLESHEET = "data:text/css;base64,"
