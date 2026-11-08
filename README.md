@@ -50,7 +50,11 @@ On the host:
 
 Nothing else is needed on the host: not Java, Gradle or Python. The packages of the build
 and of the desktops, the OpenJDK, and the Python that `lib/approve.py` runs with are
-installed in each container, which asks first, unless `--yes` is given.
+installed in each container, which asks first, unless `--yes` is given. The OpenJDK is the
+version of `jfx.build.jdk.version.min` of the sources. When a distribution does not package
+it (such as 24, which is not LTS), a newer OpenJDK of the container is used, which the
+Gradle of the sources may not run on: then give an OpenJDK of that version on the host with
+`--jdk=DIR`.
 
 The containers are regular toolbox containers, so you can also open one yourself:
 
@@ -272,7 +276,7 @@ manual/JDK8354943Test.sh --sdk=DIR --headless JDK-8353556 JDK-8316425
 | Linux Mint   | `mint:X.Y` (21–21.3, 22–22.3)   | yes   | yes | yes        | yes      |
 
 Toolbox has no Mint image: `mint:X.Y` is the Ubuntu it is based on, plus the
-repository of Mint. KDE on X11 is not available from Plasma 6.8 on.
+repository of Mint. KDE on X11 is not available from Plasma 6.8 on (Arch, Fedora 45).
 
 `--sessions` chooses the kinds of session, separated by commas (`--session` is the
 same). Each desktop runs in each of them, as an environment of its own: the default

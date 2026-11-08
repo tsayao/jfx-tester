@@ -290,8 +290,8 @@ packages_libei() {
     esac
 }
 
-# Why a desktop, in a kind of session, is not available on a distribution,
-# if it is not
+# Why a desktop, in a kind of session, is not available on a distribution
+# (of a release), if it is not
 desktop_unsupported() {
     case "$1:$2" in
         rhel:kde) echo "RHEL does not ship KDE Plasma (use fedora, ubuntu or arch)"; return ;;
@@ -300,6 +300,13 @@ desktop_unsupported() {
     case "$1:$2:$(session_type "$2" "$3")" in
         *:cinnamon:wayland) echo "Cinnamon runs on X11 here (use gnome or kde)" ;;
         arch:kde:x11) echo "The Plasma of Arch (6.8 and later) has no X11 session (use fedora or ubuntu)" ;;
+        fedora:kde:x11)
+            # Fedora 45 updates to Plasma 6.8, whose KWin conflicts with the
+            # kwin-x11 6.7 of the release
+            case "$4" in
+                4[0-4]|3*) ;;
+                *) echo "The Plasma of Fedora $4 (6.8 and later) has no X11 session (use fedora:44 or ubuntu)" ;;
+            esac ;;
     esac
 }
 

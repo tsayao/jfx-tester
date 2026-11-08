@@ -153,7 +153,8 @@
 #                           distribution to build and test with, installed
 #                           in its container (jfx.build.jdk.version.min of
 #                           the build.properties of the sources, or of the
-#                           workspace)
+#                           workspace, or a newer one of the container
+#                           when the distribution has not got it)
 #   --sdk=DIR               a JavaFX SDK of the host (with lib/javafx.*.jar)
 #                           to run the manual test with, instead of a build
 #                           of the sources; it takes neither --source nor
@@ -617,7 +618,7 @@ ensure_packages() {
     packages="$(packages_build "$DISTRO") $(packages_runtime "$DISTRO")"
     for unit in $UNITS; do
         set_unit "$unit"
-        [ -n "$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")" ] && continue
+        [ -n "$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION" "$RELEASE")" ] && continue
         packages="$packages $(packages_desktop "$DISTRO" "$desktop")"
         packages="$packages $(packages_session "$DISTRO" "$desktop" "$SESSION")"
         [ -n "$IME" ] && packages="$packages $(packages_ime "$DISTRO" "$IME" "$WAYLAND")"
@@ -653,37 +654,53 @@ ensure_packages() {
     done
 }
 
-# The OpenJDK of the distribution, of the version asked for, unless --jdk
+# The OpenJDK of the version asked for, unless --jdk: one of the container, or
+# else of the distribution. Without --jdk-version, the version of the sources
+# is a minimum, so that a newer OpenJDK of the container is the last resort,
+# although their Gradle may run on no later one (the distributions do not keep
+# the versions that are not LTS, such as 24)
 ensure_jdk() {
     if [ -n "$JDK" ]; then
         JAVA_HOME_IN=$(container_path "$JDK")
         return 0
     fi
     version=$(jdk_version) || return 1
-    if JAVA_HOME_IN=$(in_container sh -c "$FIND_JDK" sh "$version"); then
-        in_container test -e "$JAVA_HOME_IN/lib/libawt_xawt.so" && return 0
-        # A headless package, whose Java has no AWT on X11: it still builds and
-        # runs the rest of the tests, so that it stays if the full one is refused
-        package=$(in_container sh -c "$(jdk_package_script "$DISTRO")" sh "$version")
-        echo "The OpenJDK $version of $CONTAINER has no AWT for X11, which Swing needs: ${package:-no package has it}"
-        if [ -n "$package" ] && confirm "Install it?" \
-                && in_container sh -c "$(install_script "$DISTRO")" sh $package; then
+    installed_jdk "$version" && return 0
+    package=$(in_container sh -c "$(jdk_package_script "$DISTRO")" sh "$version")
+    if [ -n "$package" ]; then
+        echo "Installing OpenJDK $version in $CONTAINER: $package"
+        if confirm "Install it?" && in_container sh -c "$(install_script "$DISTRO")" sh $package \
+                && JAVA_HOME_IN=$(in_container sh -c "$FIND_JDK" sh "$version"); then
             return 0
         fi
-        echo "Not installed: the tests of Swing are skipped" >&2
+        echo "$package did not install OpenJDK $version" >&2
+    fi
+    if [ -z "$JDK_VERSION" ]; then
+        for v in $(seq $((version + 1)) $((version + 8))); do
+            if installed_jdk "$v"; then
+                echo "Building with the OpenJDK $v of $CONTAINER, newer than the $version of the sources: their Gradle may not run on it" >&2
+                return 0
+            fi
+        done
+    fi
+    echo "No OpenJDK $version for $DISTRO $RELEASE: use --jdk-version, or --jdk with an OpenJDK $version of the host" >&2
+    return 1
+}
+
+# Whether the container has the OpenJDK of feature version $1, in JAVA_HOME_IN.
+# A headless package, whose Java has no AWT on X11, still builds and runs the
+# rest of the tests, so that it stays if the full one is refused
+installed_jdk() {
+    JAVA_HOME_IN=$(in_container sh -c "$FIND_JDK" sh "$1") || return 1
+    in_container test -e "$JAVA_HOME_IN/lib/libawt_xawt.so" && return 0
+    package=$(in_container sh -c "$(jdk_package_script "$DISTRO")" sh "$1")
+    echo "The OpenJDK $1 of $CONTAINER has no AWT for X11, which Swing needs: ${package:-no package has it}"
+    if [ -n "$package" ] && confirm "Install it?" \
+            && in_container sh -c "$(install_script "$DISTRO")" sh $package; then
         return 0
     fi
-    package=$(in_container sh -c "$(jdk_package_script "$DISTRO")" sh "$version")
-    if [ -z "$package" ]; then
-        echo "$DISTRO $RELEASE has no OpenJDK $version: use --jdk-version or --jdk" >&2
-        return 1
-    fi
-    echo "Installing OpenJDK $version in $CONTAINER: $package"
-    confirm "Install it?" || { echo "Not installed" >&2; return 1; }
-    in_container sh -c "$(install_script "$DISTRO")" sh $package || return 1
-    JAVA_HOME_IN=$(in_container sh -c "$FIND_JDK" sh "$version") && return 0
-    echo "$package did not install OpenJDK $version: use --jdk-version or --jdk" >&2
-    return 1
+    echo "Not installed: the tests of Swing are skipped" >&2
+    return 0
 }
 
 # The feature version of the JDK: the one given, or jfx.build.jdk.version.min
@@ -1097,7 +1114,7 @@ run_distribution() {
     jobs=
     for unit in $UNITS; do
         set_unit "$unit"
-        reason=$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION")
+        reason=$(desktop_unsupported "$DISTRO" "$desktop" "$SESSION" "$RELEASE")
         if [ -z "$reason" ] && [ "$desktop:$(session_type "$desktop" "$SESSION")" = gnome:x11 ] \
                 && ! in_container sh -c 'gnome-shell --help-all 2>&1 | grep -q -e "--x11 "'; then
             reason="The GNOME of $DISTRO $RELEASE has no X11 session (GNOME 49 and later do not)"
