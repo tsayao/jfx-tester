@@ -301,6 +301,8 @@ public class DragDropLab {
     private Node lastDropTarget;
     private TransferMode lastOverMode;
     private int counter;
+    // The formats that the chip "Image and more" adds to its image
+    private List<String> imageWith = List.of();
 
     // What the tests check, written by the event handlers
     final TestKit.Suite suite = new TestKit.Suite("Drag and drop");
@@ -315,12 +317,15 @@ public class DragDropLab {
     private Node menuTarget;
     private ContextMenu dragEndMenu;
     private String menuPicked;
+    // The mouse events that reached the menu shown after a drag
+    private int menuMouseEvents;
     private ListView<String> todoList;
     private ListView<String> doneList;
     private boolean reorderedInList;
     private int drops;
     private String droppedText;
     private Image droppedImage;
+    private boolean droppedHasImage;
     private String droppedFiles;
     private List<File> droppedFileList;
     private String droppedHtml;
@@ -506,13 +511,19 @@ public class DragDropLab {
             stage.toFront();
             stage.requestFocus();
         });
+        // The keys that reach the scene, during a drag too, with the mouse events of -Ddragdrop.logMouse
+        TestKit.whenInScene(grabSource, scene -> scene.addEventFilter(javafx.scene.input.KeyEvent.ANY, e -> {
+            if (logMouse.isSelected()) {
+                log(e.getEventType() + " " + e.getCode() + " in the scene" + (drag() ? ", during a drag" : ""));
+            }
+        }));
         suite.setAfterRobotFailure(this::resetOptions);
         suite.onTab(modes, "Copy", "Move", "Link", "Incompatible modes", "Ctrl chooses COPY", "Shift chooses MOVE",
                 "Ctrl+Shift chooses LINK", "Shift pressed during the drag", "Ctrl released during the drag",
                 "Every pair of modes");
         suite.onTab(formats, "Text", "Image", "Files", "Custom format", "RTF", "Custom bytes",
                 "Rejected by the target", "Extreme image offsets", "HTML", "URL", "Unicode text", "Large text",
-                "Large image", "Odd file names", "Every format at once");
+                "Large image", "Odd file names", "Every format at once", "Image with each other format");
         suite.onTab(colors, "Color copy", "Color move", "Color as text");
         suite.onTab(gestures, "Full drag", "Full drag released outside the window", "New stage during a drag");
         suite.onTab(after, "Menu after a drag", "Menu after a drop", "Dialog after a drag");
@@ -707,6 +718,19 @@ public class DragDropLab {
                 chip("Large text", "4 MiB, in chunks over X11", c -> c.putString(LARGE_TEXT)),
                 chip("Large image", "1600 × 1200 gradient", c -> c.putImage(largeImage)),
                 chip("Odd file names", "spaces, %, #, +, &, accents, emoji", c -> c.putFiles(oddFiles())),
+                chip("Image and more", "the image and the formats of a test", sampleImage, c -> {
+                    c.putImage(sampleImage);
+                    for (String f : imageWith) {
+                        switch (f) {
+                            case "text" -> c.putString("Text with the image");
+                            case "HTML" -> c.putHtml("<p>HTML with the image</p>");
+                            case "files" -> c.putFiles(sampleFiles());
+                            case "URL" -> c.putUrl(URL);
+                            case "custom" -> c.put(CUSTOM, "Custom with the image");
+                            default -> throw new IllegalArgumentException(f);
+                        }
+                    }
+                }),
                 chip("Everything", "all of the above", c -> {
                     c.putString("Everything from JavaFX");
                     c.putHtml("<p>Everything from <b>JavaFX</b></p>");
@@ -980,7 +1004,10 @@ public class DragDropLab {
     private boolean showReceived(Dragboard db, TransferMode mode, String source) {
         drops++;
         droppedText = db.hasString() ? db.getString() : null;
-        droppedImage = db.hasImage() ? db.getImage() : null;
+        // getImage apart from hasImage, which answers false with HTML before the image (see "Image with each
+        // other format")
+        droppedHasImage = db.hasImage();
+        droppedImage = db.getContentTypes().contains(DataFormat.IMAGE) ? db.getImage() : null;
         droppedFiles = db.hasFiles() ? verifyFiles(db.getFiles()) : null;
         droppedFileList = db.hasFiles() ? List.copyOf(db.getFiles()) : null;
         droppedHtml = db.hasHtml() ? db.getHtml() : null;
@@ -1275,6 +1302,13 @@ public class DragDropLab {
             });
             dragEndMenu.getItems().add(item);
         }
+        // Where the clicks of the menu go, with -Ddragdrop.logMouse
+        dragEndMenu.setOnShown(e -> dragEndMenu.getScene().addEventFilter(MouseEvent.ANY, m -> {
+            menuMouseEvents++;
+            if (logMouse.isSelected() && m.getEventType() != MouseEvent.MOUSE_MOVED) {
+                log(m.getEventType() + " in the menu shown after the drag, on " + m.getTarget());
+            }
+        }));
         VBox source = new VBox(styled("Drag me", "title"), result);
         source.getStyleClass().addAll("tile", "source");
         menuSource = source;
@@ -2202,6 +2236,11 @@ public class DragDropLab {
      * that it does not fail the next tests: Escape, and a click in a corner
      * of the window that is no destination, with the buttons released first.
      */
+    /** Whether a drag of the grab card has started and not ended. */
+    private boolean drag() {
+        return grabStatus != null && grabStatus.getText().startsWith("Dragging");
+    }
+
     private void recoverDrag() {
         try {
             fx(() -> TestKit.robot().mouseRelease(javafx.scene.input.MouseButton.PRIMARY));
@@ -2496,13 +2535,19 @@ public class DragDropLab {
                 + "and a click picks its second item", () -> {
             fx(() -> {
                 menuPicked = null;
+                menuMouseEvents = 0;
                 dragEndMenu.hide();
             });
             try {
                 TestKit.drag(menuSource, menuTarget);
                 await("the context menu", 5000, () -> dragEndMenu.isShowing());
                 TestKit.click(awaitMenuItem(dragEndMenu, "#move-here"));
-                await("the item action", () -> menuPicked != null);
+                try {
+                    await("the item action", () -> menuPicked != null);
+                } catch (AssertionError e) {
+                    throw new AssertionError("JDK-8395594: the menu shown at DRAG_DONE did not take the click, with "
+                            + fx(() -> menuMouseEvents) + " mouse events on it: the pointer stays with the drag");
+                }
                 check("Move here".equals(fx(() -> menuPicked)), "picked " + fx(() -> menuPicked));
                 await("the menu hidden", () -> !dragEndMenu.isShowing());
             } catch (AssertionError e) {
@@ -2673,6 +2718,12 @@ public class DragDropLab {
                 await("the drop of the drag after the cancelled one", 5000, () -> grabDrops(grabTarget) > drops);
                 await("DRAG_DONE of the drag after the cancelled one", 5000, () -> grabDone != null);
             } catch (AssertionError e) {
+                if (!fx(() -> grabStatus.getText().startsWith("Dragging"))) {
+                    throw new AssertionError("the drag after a drag cancelled with Escape (which ended " + first
+                            + ") never starts: no DRAG_DETECTED, as the Scene got no MOUSE_RELEASED after the first "
+                            + "drag and takes the button for still down (primaryButtonDown), so that the next press "
+                            + "starts no gesture");
+                }
                 throw new AssertionError("the drag after a drag cancelled with Escape (which ended " + first
                         + ") never ends: " + e.getMessage());
             }
@@ -2948,9 +2999,35 @@ public class DragDropLab {
             }
             check("Everything from JavaFX".equals(fx(() -> droppedText)), "the text is " + fx(() -> droppedText));
             check(fx(() -> droppedImage) != null, "the image could not be read");
+            check(fx(() -> droppedHasImage), "hasImage() is false, although getImage() reads the image (see \"Image "
+                    + "with each other format\")");
             String verdict = fx(() -> droppedFiles);
             check(verdict != null && verdict.startsWith("SUCCESS"), "the files verdict is " + verdict);
             return formats(types);
+        });
+        robot("Image with each other format", "Drops the image with text, HTML, files, a URL and a custom format, "
+                + "one at a time and all together: the image must be read each time", () -> {
+            List<List<String>> sets = List.of(List.of(), List.of("text"), List.of("HTML"), List.of("files"),
+                    List.of("URL"), List.of("custom"), List.of("text", "HTML", "files", "URL", "custom"));
+            List<String> broken = new ArrayList<>();
+            List<String> notAnnounced = new ArrayList<>();
+            for (List<String> set : sets) {
+                fx(() -> imageWith = set);
+                dropChip("Image and more", 10000);
+                Image image = fx(() -> droppedImage);
+                String name = set.isEmpty() ? "alone" : String.join(" + ", set);
+                if (image == null || image.getWidth() != sampleImage.getWidth()) {
+                    broken.add(name);
+                } else if (!fx(() -> droppedHasImage)) {
+                    notAnnounced.add(name);
+                }
+            }
+            fx(() -> imageWith = List.of());
+            check(broken.isEmpty(), "the image could not be read with: " + broken);
+            check(notAnnounced.isEmpty(), "hasImage() is false, although getImage() reads the image, with: "
+                    + notAnnounced + ": QuantumClipboard.hasContent(IMAGE) returns at text/html, whether its HTML has "
+                    + "an <img>, before it looks at the raw image");
+            return "read with each format and all of them";
         });
         robot("Full drag released outside the window", "JDK-8365635: a press-drag-release that ends on the "
                 + "desktop must end with one MOUSE_DRAG_DONE on its source", () -> {
@@ -3270,7 +3347,9 @@ public class DragDropLab {
                     await("MOUSE_RELEASED on the parent", 3000, () -> childCounts.released > 0);
                 } catch (AssertionError e) {
                     throw new AssertionError("JDK-8087684: the parent got " + fx(childCounts::toString)
-                            + "; the scene saw " + fx(() -> List.copyOf(seen)));
+                            + ", as Scene sets pdrInProgress after it dispatched the press, so that "
+                            + "handleNodeRemoval leaves the removed child the target of the gesture; the scene saw "
+                            + fx(() -> List.copyOf(seen)));
                 }
                 check(fx(() -> childCounts.detected) == 1, "the parent: " + fx(childCounts::toString));
                 check(fx(() -> childCounts.dragged) >= 10, "the parent: " + fx(childCounts::toString));
